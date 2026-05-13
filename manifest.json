@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "ClipBounce",
+  "version": "0.1.0",
+  "description": "Prompt multiple websites at once. Select sources, ask anything, get a multi-source synthesis.",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_popup": "popup/index.html",
+    "default_title": "ClipBounce"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
+}

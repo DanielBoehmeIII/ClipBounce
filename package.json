@@ -1,0 +1,27 @@
+{
+  "name": "clipbounce",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Prompt multiple websites at once — multi-source synthesis extension",
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:popup && npm run build:scripts && npm run copy:assets",
+    "build:popup": "vite build",
+    "build:scripts": "node scripts/build-scripts.mjs",
+    "copy:assets": "node scripts/copy-assets.mjs",
+    "dev": "npm run build:popup -- --watch & npm run build:scripts -- --watch"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.0"
+  }
+}
