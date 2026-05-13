@@ -31,6 +31,7 @@ export default function App() {
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle');
   const [connectionMsg, setConnectionMsg] = useState('');
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [expandedText, setExpandedText] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     loadSettings().then((cfg) => {
@@ -162,6 +163,15 @@ export default function App() {
 
   const removeSource = useCallback((id: string) => {
     setSources((prev) => prev.filter((s) => s.id !== id));
+  }, []);
+
+  const toggleExpandedText = useCallback((id: string) => {
+    setExpandedText((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }, []);
 
   const generate = useCallback(async () => {
@@ -389,7 +399,23 @@ export default function App() {
                   <div className="source-error">{source.error}</div>
                 )}
                 {source.status === 'ready' && source.charCount && (
-                  <div className="source-chars">{source.charCount.toLocaleString()} chars</div>
+                  <>
+                    <div className="source-chars-bar">
+                      <div className="source-chars-fill" style={{ width: Math.min(100, (source.charCount / 5000) * 100) + '%' }} />
+                    </div>
+                    <div className="source-chars-row">
+                      <span className="source-chars">{source.charCount.toLocaleString()} chars</span>
+                      {source.charCount < 500 && (
+                        <span className="source-weak">Partial extraction</span>
+                      )}
+                    </div>
+                    <button className="btn-text-toggle" onClick={() => toggleExpandedText(source.id)}>
+                      {expandedText.has(source.id) ? 'Hide' : 'View'} extracted text
+                    </button>
+                    {expandedText.has(source.id) && source.cleanText && (
+                      <pre className="source-extracted-preview">{source.cleanText.slice(0, 2000)}{source.cleanText.length > 2000 ? '\n...' : ''}</pre>
+                    )}
+                  </>
                 )}
               </div>
             ))}
@@ -460,6 +486,17 @@ export default function App() {
             {result.successfulSourceCount} source{result.successfulSourceCount !== 1 ? 's' : ''} analyzed
             {result.failedSourceCount > 0 && `, ${result.failedSourceCount} failed`}
             {' \u00b7 '}Provider: {currentProviderLabel}
+            {result.chunkBudget && (
+              <>
+                {' \u00b7 '}{result.chunkBudget.selectedChunks} chunk{result.chunkBudget.selectedChunks !== 1 ? 's' : ''} loaded
+                {result.chunkBudget.truncated && (
+                  <span className="truncation-badge"> ({result.chunkBudget.truncatedChars.toLocaleString()} chars truncated)</span>
+                )}
+              </>
+            )}
+            {result.citations && result.citations.length > 0 && (
+              <span className="citations-badge"> \u00b7 {result.citations.length} evidence chunk{result.citations.length !== 1 ? 's' : ''}</span>
+            )}
           </div>
 
           <div className="synthesis-content">{renderSynthesis(result.synthesis)}</div>

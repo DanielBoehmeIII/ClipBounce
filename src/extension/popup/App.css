@@ -387,6 +387,68 @@ body {
   font-size: 0.7rem;
 }
 
+.source-chars-bar {
+  margin-top: 4px;
+  height: 3px;
+  background: var(--bg);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.source-chars-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.source-chars-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.source-weak {
+  color: var(--yellow);
+  font-size: 0.65rem;
+  font-weight: 500;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: rgba(251, 191, 36, 0.1);
+  border: 1px solid rgba(251, 191, 36, 0.2);
+}
+
+.btn-text-toggle {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 0.7rem;
+  cursor: pointer;
+  padding: 0;
+  margin-top: 3px;
+  display: block;
+}
+
+.btn-text-toggle:hover {
+  text-decoration: underline;
+}
+
+.source-extracted-preview {
+  margin-top: 4px;
+  padding: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  max-height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  line-height: 1.4;
+}
+
 .prompt-section {
   display: flex;
   flex-direction: column;
@@ -490,6 +552,16 @@ body {
   font-size: 0.75rem;
   color: var(--text-muted);
   margin-bottom: 12px;
+}
+
+.truncation-badge {
+  color: var(--yellow);
+  font-size: 0.7rem;
+}
+
+.citations-badge {
+  color: var(--green);
+  font-size: 0.7rem;
 }
 
 .synthesis-content {

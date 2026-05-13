@@ -1,5 +1,5 @@
 import type { AIProvider } from './AIProvider';
-import type { SourceRecord, PromptSpec, SourceMiniSummary, BundleSynthesisResult } from '../../types';
+import type { SourceRecord, PromptSpec, SourceMiniSummary, BundleSynthesisResult, ChunkBudget } from '../../types';
 import { getDomain } from '../../../utils/url';
 
 export class RemoteProvider implements AIProvider {
@@ -61,13 +61,15 @@ ${(source.cleanText || '').slice(0, 8000)}`;
     prompt: PromptSpec;
     sources: SourceRecord[];
     sourceSummaries: SourceMiniSummary[];
+    formattedSources?: string;
+    chunkBudget?: ChunkBudget;
   }): Promise<BundleSynthesisResult> {
-    const { prompt, sources, sourceSummaries } = input;
+    const { prompt, sources, sourceSummaries, formattedSources, chunkBudget } = input;
 
     const readySources = sources.filter((s) => s.status === 'ready');
     const failedSources = sources.filter((s) => s.status === 'failed');
 
-    const sourceBlocks = sources.map((s, i) => {
+    const sourceBlocks = formattedSources || sources.map((s, i) => {
       const idx = i + 1;
       if (s.status === 'ready') {
         return `[${idx}] ${s.title || 'Untitled'}
@@ -96,17 +98,25 @@ Key points: ${s.keyPoints.join(', ')}`;
       'Do not use any external knowledge or make up information. ' +
       'If the sources do not contain enough information to answer, say so clearly.';
 
+    const chunkInstruction = formattedSources
+      ? 'When citing, use the chunk notation [sourceNumber.chunkNumber] (e.g., [1.2], [2.1]) for specific subsections, or [sourceNumber] (e.g., [1], [2]) for an entire source. Distinguish direct evidence (explicitly stated) from inference (your reasoning). Label inferences with "(inferred)".'
+      : 'Reference sources by their number like [1], [2], etc. in your answer.';
+
+    const budgetNote = chunkBudget?.truncated
+      ? `\nNote: Some source content was truncated to fit processing limits (${chunkBudget.truncatedChars.toLocaleString()} chars omitted). ${chunkBudget.selectedChunks} of ${chunkBudget.totalChunks} total chunks were selected.`
+      : '';
+
     const userContent = `User request: ${prompt.userPrompt}
 
 Sources:
 ${sourceBlocks}
 
 Per-source summaries:
-${summaryBlocks}
+${summaryBlocks}${budgetNote}
 
 Instructions:
 1. Synthesize an answer using ONLY the provided sources.
-2. Reference sources by their number like [1], [2], etc. in your answer.
+2. ${chunkInstruction}
 3. Clearly separate repeated ideas (found in multiple sources) from unique ideas (found in only one source).
 4. If some source content is not accessible (marked "[Content not accessible]"), mention it.
 5. If the user's request cannot be answered from the sources, say so.
@@ -114,7 +124,7 @@ Instructions:
 Return your response in this format:
 
 ## Synthesis
-<your synthesized answer with inline references like [1], [2]>
+<your synthesized answer with inline references like [1], [1.2], [2]>
 
 ## Repeated Ideas
 - <idea> (mentioned in [1], [2], [3])
@@ -141,6 +151,7 @@ Return your response in this format:
         reason: s.error || 'Unknown error',
       })),
       generatedAt: new Date().toISOString(),
+      chunkBudget,
     };
   }
 

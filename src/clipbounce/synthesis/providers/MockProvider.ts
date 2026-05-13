@@ -1,5 +1,5 @@
 import type { AIProvider } from './AIProvider';
-import type { SourceRecord, PromptSpec, SourceMiniSummary, BundleSynthesisResult } from '../../types';
+import type { SourceRecord, PromptSpec, SourceMiniSummary, BundleSynthesisResult, ChunkBudget } from '../../types';
 import { getDomain } from '../../../utils/url';
 
 const MOCK_SUMMARIES = [
@@ -57,14 +57,16 @@ export class MockProvider implements AIProvider {
     prompt: PromptSpec;
     sources: SourceRecord[];
     sourceSummaries: SourceMiniSummary[];
+    formattedSources?: string;
+    chunkBudget?: ChunkBudget;
   }): Promise<BundleSynthesisResult> {
-    const { prompt, sources, sourceSummaries } = input;
+    const { prompt, sources, sourceSummaries, chunkBudget } = input;
     await delay(500 + Math.random() * 1000);
 
     const readySources = sources.filter((s) => s.status === 'ready');
     const failedSources = sources.filter((s) => s.status === 'failed');
 
-    const synthesis = generateMockSynthesis(prompt, readySources, failedSources);
+    const synthesis = generateMockSynthesis(prompt, readySources, failedSources, chunkBudget);
     const repeated = [
       'All sources emphasize the importance of understanding foundational concepts before diving into specifics.',
       'Multiple sources highlight the role of practical application in reinforcing theoretical knowledge.',
@@ -87,6 +89,7 @@ export class MockProvider implements AIProvider {
         reason: s.error || 'Unknown error',
       })),
       generatedAt: new Date().toISOString(),
+      chunkBudget,
     };
   }
 }
@@ -95,6 +98,7 @@ function generateMockSynthesis(
   prompt: PromptSpec,
   ready: SourceRecord[],
   failed: SourceRecord[],
+  chunkBudget?: ChunkBudget,
 ): string {
   const parts: string[] = [];
 
@@ -132,6 +136,11 @@ function generateMockSynthesis(
   parts.push(
     'For a deeper understanding, explore the specific sources most relevant to your particular interest area. The sources collectively provide a solid foundation for further investigation.',
   );
+
+  if (chunkBudget?.truncated) {
+    parts.push('');
+    parts.push(`> *Note: ${chunkBudget.truncatedChars.toLocaleString()} characters were truncated from source content to fit the processing budget. ${chunkBudget.selectedChunks} of ${chunkBudget.totalChunks} total chunks were included.*`);
+  }
 
   if (failed.length > 0) {
     parts.push('');
