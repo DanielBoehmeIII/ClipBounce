@@ -1,4 +1,4 @@
-import type { SourceRecord, PromptSpec, SourceMiniSummary, BundleSynthesisResult } from '../../types';
+import type { SourceRecord, PromptSpec, SourceMiniSummary, BundleSynthesisResult, ChunkBudget } from '../../types';
 
 export interface AIProvider {
   name: string;
@@ -11,5 +11,7 @@ export interface AIProvider {
     prompt: PromptSpec;
     sources: SourceRecord[];
     sourceSummaries: SourceMiniSummary[];
+    formattedSources?: string;
+    chunkBudget?: ChunkBudget;
   }): Promise<BundleSynthesisResult>;
 }

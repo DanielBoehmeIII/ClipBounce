@@ -1,4 +1,5 @@
-import type { PromptSpec, PromptMode } from '../types';
+import type { PromptSpec, PromptMode, SourceRecord, SourceMiniSummary, ChunkNode } from '../types';
+import { getDomain } from '../../utils/url';
 
 const MODE_KEYWORDS: Record<PromptMode, string[]> = {
   comparison: ['compare', 'versus', 'vs', 'differences', 'contrast', 'similarities'],
@@ -53,11 +54,79 @@ function modeInstruction(mode: PromptMode): string {
   }
 }
 
+export function formatSourceForPrompt(source: SourceRecord, index: number): string {
+  const idx = index + 1;
+  const lines: string[] = [
+    `[${idx}] ${source.title || 'Untitled'}`,
+    `URL: ${source.url}`,
+    `Domain: ${source.domain || getDomain(source.url)}`,
+  ];
+  if (source.status === 'ready' && source.cleanText) {
+    lines.push('', source.cleanText.slice(0, 5000));
+  } else if (source.status === 'failed') {
+    lines.push('', `[Content not accessible: ${source.error || 'Unknown error'}]`);
+  } else {
+    lines.push('', '[Content not yet extracted]');
+  }
+  return lines.join('\n');
+}
+
+export function formatSourceSummariesForPrompt(
+  summaries: SourceMiniSummary[],
+  sources: SourceRecord[],
+): string {
+  return summaries
+    .map((s) => {
+      const idx = sources.findIndex((src) => src.id === s.sourceId) + 1;
+      return `[${idx}] ${s.title || s.url}\nSummary: ${s.summary}\nKey points: ${s.keyPoints.join(', ')}`;
+    })
+    .join('\n\n');
+}
+
+export function buildChunkFormattedSources(chunks: ChunkNode[], sources: SourceRecord[]): string {
+  const groups = new Map<number, ChunkNode[]>();
+  for (const chunk of chunks) {
+    if (!groups.has(chunk.sourceNumber)) groups.set(chunk.sourceNumber, []);
+    groups.get(chunk.sourceNumber)!.push(chunk);
+  }
+
+  const lines: string[] = [];
+  const sortedKeys = Array.from(groups.keys()).sort((a, b) => a - b);
+
+  for (const sourceNum of sortedKeys) {
+    const sourceChunks = groups.get(sourceNum)!;
+    const src = sources.find(s => s.id === sourceChunks[0].sourceId);
+    lines.push(`[Source ${sourceNum}] ${src?.title || 'Untitled'}`);
+    lines.push(`URL: ${sourceChunks[0].url}`);
+    lines.push(`Domain: ${src?.domain || getDomain(sourceChunks[0].url)}`);
+    lines.push('');
+
+    for (const chunk of sourceChunks) {
+      const headingStr = chunk.headingPath.length > 0
+        ? ` (${chunk.headingPath.join(' > ')})`
+        : '';
+      lines.push(`[${chunk.chunkId}]${headingStr}`);
+      lines.push(chunk.content);
+      lines.push('');
+    }
+  }
+
+  return lines.join('\n');
+}
+
 export function buildModelPrompt(
   userPrompt: string,
   spec: PromptSpec,
-  sourceSummaries: string,
+  sources: SourceRecord[],
+  sourceSummaries: SourceMiniSummary[],
+  chunks?: ChunkNode[],
 ): string {
+  const summaryBlocks = formatSourceSummariesForPrompt(sourceSummaries, sources);
+
+  const sourceBlock = chunks && chunks.length > 0
+    ? buildChunkFormattedSources(chunks, sources)
+    : sources.map((s, i) => formatSourceForPrompt(s, i)).join('\n\n---\n\n');
+
   return `SYSTEM:
 ${SYSTEM_PROMPT}
 
@@ -69,19 +138,23 @@ Mode: ${spec.mode}
 ${modeInstruction(spec.mode)}
 
 Sources:
-${sourceSummaries}
+${sourceBlock}
+
+Source summaries:
+${summaryBlocks}
 
 Instructions:
 1. Identify the overall pattern across the sources.
 2. Separate repeated ideas from unique ideas.
 3. Prioritize information that directly answers the user request.
 4. Do not fabricate details not present in the sources.
-5. Mention source titles/domains when useful.
-6. If some sources failed, briefly list them at the end.
-7. Produce a clean answer in the most appropriate format.
+5. Reference sources by their number like [1], [2], etc. When citing specific subsections, use chunk notation like [1.2], [2.1] to point to specific sections within a source.
+6. Distinguish direct evidence (explicitly stated in a source) from inference (your reasoning based on source material). When drawing inferences, label them clearly.
+7. If some sources failed or are inaccessible, mention them.
+8. Produce a clean answer in the most appropriate format.
 
 Return:
-- Brief answer
+- Brief answer with inline citations
 - Key takeaways
 - Unique details
 - Source notes

@@ -46,6 +46,27 @@ export type SourceMiniSummary = {
   usefulQuotes?: string[];
 };
 
+export type ChunkNode = {
+  chunkId: string;
+  sourceId: string;
+  sourceNumber: number;
+  title?: string;
+  url: string;
+  headingPath: string[];
+  content: string;
+  charCount: number;
+  index: number;
+};
+
+export type ChunkBudget = {
+  totalChars: number;
+  selectedChars: number;
+  truncated: boolean;
+  truncatedChars: number;
+  totalChunks: number;
+  selectedChunks: number;
+};
+
 export type BundleSynthesisResult = {
   prompt: string;
   sourceCount: number;
@@ -57,6 +78,15 @@ export type BundleSynthesisResult = {
   uniqueIdeas?: string[];
   failures: { url: string; reason: string }[];
   generatedAt: string;
+  citations?: { sourceNumber: number; sourceId: string; chunkId?: string; headingPath?: string[] }[];
+  chunkBudget?: ChunkBudget;
+};
+
+export type ProviderMode = "mock" | "local";
+
+export type ProviderConfig = {
+  mode: ProviderMode;
+  backendUrl: string;
 };
 
 export type ExtractedContent = {

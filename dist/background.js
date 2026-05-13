@@ -93,6 +93,21 @@ async function saveResult(result) {
   await saveSession(session);
 }
 
+// src/clipbounce/storage/settingsStore.ts
+var SETTINGS_KEY = "clipbounce_settings";
+var DEFAULT_SETTINGS = {
+  mode: "mock",
+  backendUrl: "http://localhost:8787"
+};
+async function loadSettings() {
+  try {
+    const result = await chrome.storage.sync.get(SETTINGS_KEY);
+    return result[SETTINGS_KEY] || DEFAULT_SETTINGS;
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
 // src/clipbounce/synthesis/promptCompiler.ts
 var MODE_KEYWORDS = {
   comparison: ["compare", "versus", "vs", "differences", "contrast", "similarities"],
@@ -125,6 +140,30 @@ function compilePromptSpec(userPrompt) {
     removeDuplicates: true,
     maxOutputLength: inferLength(userPrompt)
   };
+}
+function buildChunkFormattedSources(chunks, sources) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const chunk of chunks) {
+    if (!groups.has(chunk.sourceNumber)) groups.set(chunk.sourceNumber, []);
+    groups.get(chunk.sourceNumber).push(chunk);
+  }
+  const lines = [];
+  const sortedKeys = Array.from(groups.keys()).sort((a, b) => a - b);
+  for (const sourceNum of sortedKeys) {
+    const sourceChunks = groups.get(sourceNum);
+    const src = sources.find((s) => s.id === sourceChunks[0].sourceId);
+    lines.push(`[Source ${sourceNum}] ${src?.title || "Untitled"}`);
+    lines.push(`URL: ${sourceChunks[0].url}`);
+    lines.push(`Domain: ${src?.domain || getDomain(sourceChunks[0].url)}`);
+    lines.push("");
+    for (const chunk of sourceChunks) {
+      const headingStr = chunk.headingPath.length > 0 ? ` (${chunk.headingPath.join(" > ")})` : "";
+      lines.push(`[${chunk.chunkId}]${headingStr}`);
+      lines.push(chunk.content);
+      lines.push("");
+    }
+  }
+  return lines.join("\n");
 }
 
 // src/clipbounce/synthesis/providers/MockProvider.ts
@@ -170,11 +209,11 @@ var MockProvider = class {
     };
   }
   async synthesizeBundle(input) {
-    const { prompt, sources, sourceSummaries } = input;
+    const { prompt, sources, sourceSummaries, chunkBudget } = input;
     await delay(500 + Math.random() * 1e3);
     const readySources = sources.filter((s) => s.status === "ready");
     const failedSources = sources.filter((s) => s.status === "failed");
-    const synthesis = generateMockSynthesis(prompt, readySources, failedSources);
+    const synthesis = generateMockSynthesis(prompt, readySources, failedSources, chunkBudget);
     const repeated = [
       "All sources emphasize the importance of understanding foundational concepts before diving into specifics.",
       "Multiple sources highlight the role of practical application in reinforcing theoretical knowledge."
@@ -195,11 +234,12 @@ var MockProvider = class {
         url: s.url,
         reason: s.error || "Unknown error"
       })),
-      generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      chunkBudget
     };
   }
 };
-function generateMockSynthesis(prompt, ready, failed) {
+function generateMockSynthesis(prompt, ready, failed, chunkBudget) {
   const parts = [];
   parts.push("## Synthesis\n");
   parts.push(
@@ -230,6 +270,10 @@ function generateMockSynthesis(prompt, ready, failed) {
   parts.push(
     "For a deeper understanding, explore the specific sources most relevant to your particular interest area. The sources collectively provide a solid foundation for further investigation."
   );
+  if (chunkBudget?.truncated) {
+    parts.push("");
+    parts.push(`> *Note: ${chunkBudget.truncatedChars.toLocaleString()} characters were truncated from source content to fit the processing budget. ${chunkBudget.selectedChunks} of ${chunkBudget.totalChunks} total chunks were included.*`);
+  }
   if (failed.length > 0) {
     parts.push("");
     parts.push("### Failed Sources");
@@ -244,11 +288,164 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// src/clipbounce/synthesis/providers/RemoteProvider.ts
+var RemoteProvider = class {
+  constructor(backendUrl) {
+    this.name = "Remote Provider";
+    this._backendUrl = backendUrl;
+  }
+  get backendUrl() {
+    return this._backendUrl;
+  }
+  setBackendUrl(url) {
+    this._backendUrl = url;
+  }
+  async summarizeSource(input) {
+    const { source } = input;
+    const system = 'You are a source summarizer. Summarize the given web page content concisely. Respond with JSON only: { "summary": "2-3 sentence summary", "keyPoints": ["point1","point2","point3"], "usefulQuotes": ["quote1"] }';
+    const userContent = `Title: ${source.title || "Untitled"}
+URL: ${source.url}
+Domain: ${source.domain || "unknown"}
+Content:
+${(source.cleanText || "").slice(0, 8e3)}`;
+    const response = await this.callAPI(system, userContent);
+    try {
+      const parsed = JSON.parse(response);
+      return {
+        sourceId: source.id,
+        title: source.title,
+        url: source.url,
+        summary: parsed.summary || response.slice(0, 500),
+        keyPoints: Array.isArray(parsed.keyPoints) ? parsed.keyPoints : [],
+        usefulQuotes: Array.isArray(parsed.usefulQuotes) ? parsed.usefulQuotes : void 0
+      };
+    } catch {
+      return {
+        sourceId: source.id,
+        title: source.title,
+        url: source.url,
+        summary: response.slice(0, 500),
+        keyPoints: []
+      };
+    }
+  }
+  async synthesizeBundle(input) {
+    const { prompt, sources, sourceSummaries, formattedSources, chunkBudget } = input;
+    const readySources = sources.filter((s) => s.status === "ready");
+    const failedSources = sources.filter((s) => s.status === "failed");
+    const sourceBlocks = formattedSources || sources.map((s, i) => {
+      const idx = i + 1;
+      if (s.status === "ready") {
+        return `[${idx}] ${s.title || "Untitled"}
+URL: ${s.url}
+Domain: ${s.domain || "unknown"}
+Content:
+${(s.cleanText || "").slice(0, 4e3)}`;
+      }
+      return `[${idx}] ${s.title || "Untitled"}
+URL: ${s.url}
+Domain: ${s.domain || "unknown"}
+Status: ${s.status}${s.error ? " - " + s.error : ""}
+[Content not accessible]`;
+    }).join("\n\n---\n\n");
+    const summaryBlocks = sourceSummaries.map((s) => {
+      const srcIdx = sources.findIndex((src) => src.id === s.sourceId) + 1;
+      return `[${srcIdx}] ${s.title || s.url}
+Summary: ${s.summary}
+Key points: ${s.keyPoints.join(", ")}`;
+    }).join("\n\n");
+    const system = "You are ClipBounce, a multi-source web synthesis engine. Answer ONLY from the provided sources below. Do not use any external knowledge or make up information. If the sources do not contain enough information to answer, say so clearly.";
+    const chunkInstruction = formattedSources ? 'When citing, use the chunk notation [sourceNumber.chunkNumber] (e.g., [1.2], [2.1]) for specific subsections, or [sourceNumber] (e.g., [1], [2]) for an entire source. Distinguish direct evidence (explicitly stated) from inference (your reasoning). Label inferences with "(inferred)".' : "Reference sources by their number like [1], [2], etc. in your answer.";
+    const budgetNote = chunkBudget?.truncated ? `
+Note: Some source content was truncated to fit processing limits (${chunkBudget.truncatedChars.toLocaleString()} chars omitted). ${chunkBudget.selectedChunks} of ${chunkBudget.totalChunks} total chunks were selected.` : "";
+    const userContent = `User request: ${prompt.userPrompt}
+
+Sources:
+${sourceBlocks}
+
+Per-source summaries:
+${summaryBlocks}${budgetNote}
+
+Instructions:
+1. Synthesize an answer using ONLY the provided sources.
+2. ${chunkInstruction}
+3. Clearly separate repeated ideas (found in multiple sources) from unique ideas (found in only one source).
+4. If some source content is not accessible (marked "[Content not accessible]"), mention it.
+5. If the user's request cannot be answered from the sources, say so.
+
+Return your response in this format:
+
+## Synthesis
+<your synthesized answer with inline references like [1], [1.2], [2]>
+
+## Repeated Ideas
+- <idea> (mentioned in [1], [2], [3])
+- <idea> (mentioned in [2], [4])
+
+## Unique Ideas
+- <idea> (unique to [1])
+- <idea> (unique to [3])
+
+## Source Notes
+<brief assessment of each source's coverage and relevance>`;
+    const response = await this.callAPI(system, userContent);
+    return {
+      prompt: prompt.userPrompt,
+      sourceCount: sources.length,
+      successfulSourceCount: readySources.length,
+      failedSourceCount: failedSources.length,
+      sourceSummaries,
+      synthesis: response,
+      failures: failedSources.map((s) => ({
+        url: s.url,
+        reason: s.error || "Unknown error"
+      })),
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      chunkBudget
+    };
+  }
+  async testConnection() {
+    try {
+      const resp = await fetch(`${this._backendUrl}/api/health`, {
+        signal: AbortSignal.timeout(5e3)
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        return { ok: true, message: data.status || "Connected" };
+      }
+      return { ok: false, message: `HTTP ${resp.status}` };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : "Connection failed" };
+    }
+  }
+  async callAPI(system, userContent) {
+    const resp = await fetch(`${this._backendUrl}/api/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system,
+        messages: [{ role: "user", content: userContent }]
+      }),
+      signal: AbortSignal.timeout(9e4)
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Backend error (${resp.status}): ${text.slice(0, 300)}`);
+    }
+    const data = await resp.json();
+    if (!data.content && typeof data.content !== "string") {
+      throw new Error("Backend returned invalid response: missing content");
+    }
+    return data.content;
+  }
+};
+
 // src/clipbounce/synthesis/providers/index.ts
 var _providers = /* @__PURE__ */ new Map();
+var _remoteProvider = new RemoteProvider("http://localhost:8787");
 function registerDefaultProviders() {
-  const mock = new MockProvider();
-  _providers.set(mock.name, mock);
+  _providers.set("Mock Provider", new MockProvider());
+  _providers.set(_remoteProvider.name, _remoteProvider);
 }
 registerDefaultProviders();
 function getProvider(name) {
@@ -256,6 +453,16 @@ function getProvider(name) {
     return _providers.get(name);
   }
   return _providers.get("Mock Provider");
+}
+function getProviderForConfig(config) {
+  if (config.mode === "local") {
+    _remoteProvider.setBackendUrl(config.backendUrl);
+    return _remoteProvider;
+  }
+  return _providers.get("Mock Provider");
+}
+function getRemoteProvider() {
+  return _remoteProvider;
 }
 
 // src/clipbounce/synthesis/sourceSummarizer.ts
@@ -283,21 +490,188 @@ async function summarizeAllSources(sources, prompt, providerName) {
   return results;
 }
 
+// src/clipbounce/synthesis/textChunker.ts
+var DEFAULT_MAX_CHUNK_SIZE = 3e3;
+var DEFAULT_MIN_CHUNK_SIZE = 100;
+function makeChunk(content, source, sourceNumber, headingPath, index) {
+  return {
+    chunkId: `${sourceNumber}.${index + 1}`,
+    sourceId: source.id,
+    sourceNumber,
+    title: source.title,
+    url: source.url,
+    headingPath,
+    content,
+    charCount: content.length,
+    index
+  };
+}
+function chunkText(text, source, sourceNumber, options) {
+  const maxSize = options?.maxChunkSize ?? DEFAULT_MAX_CHUNK_SIZE;
+  const minSize = options?.minChunkSize ?? DEFAULT_MIN_CHUNK_SIZE;
+  const chunks = [];
+  let chunkIndex = 0;
+  const blocks = text.split(/\n\n+/);
+  let currentContent = "";
+  let currentHeadings = [];
+  function flushCurrent() {
+    if (!currentContent) return;
+    const chunk = makeChunk(currentContent.trim(), source, sourceNumber, [...currentHeadings], chunkIndex++);
+    if (chunk.charCount >= minSize || chunks.length === 0) {
+      chunks.push(chunk);
+    } else if (chunks.length > 0) {
+      const last = chunks[chunks.length - 1];
+      if (last.charCount + chunk.charCount <= maxSize) {
+        chunks[chunks.length - 1] = makeChunk(
+          last.content + "\n\n" + chunk.content,
+          source,
+          sourceNumber,
+          last.headingPath,
+          last.index
+        );
+      }
+    }
+    currentContent = "";
+  }
+  for (const block of blocks) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+    const headingMatch = trimmed.match(/^(#{2,4})\s+(.+)$/m);
+    if (headingMatch && trimmed === headingMatch[0]) {
+      flushCurrent();
+      const level = headingMatch[1].length;
+      const headingText = headingMatch[2].trim();
+      while (currentHeadings.length > 0) {
+        const last = currentHeadings[currentHeadings.length - 1];
+        const lastLevel = parseInt(last.charAt(1));
+        if (level <= lastLevel) {
+          currentHeadings.pop();
+        } else {
+          break;
+        }
+      }
+      currentHeadings.push(`h${level}: ${headingText}`);
+      currentContent = trimmed;
+    } else {
+      if (!currentContent) {
+        currentContent = trimmed;
+      } else if (currentContent.length + trimmed.length + 2 > maxSize) {
+        flushCurrent();
+        currentContent = trimmed;
+        if (trimmed.length > maxSize) {
+          flushCurrent();
+          chunks.push(makeChunk(
+            trimmed.slice(0, maxSize),
+            source,
+            sourceNumber,
+            [...currentHeadings],
+            chunkIndex++
+          ));
+          currentContent = "";
+        }
+      } else {
+        currentContent += "\n\n" + trimmed;
+      }
+    }
+  }
+  flushCurrent();
+  if (chunks.length === 0 && text.trim()) {
+    chunks.push(makeChunk(
+      text.trim().slice(0, maxSize),
+      source,
+      sourceNumber,
+      [],
+      0
+    ));
+  }
+  return chunks;
+}
+function selectChunksForBudget(chunks, userPrompt, budget) {
+  if (chunks.length === 0) {
+    return { selected: [], truncated: false, truncatedChars: 0, totalChars: 0, selectedChars: 0, totalChunks: 0, selectedChunks: 0 };
+  }
+  const totalChars = chunks.reduce((sum, c) => sum + c.charCount, 0);
+  if (totalChars <= budget) {
+    return { selected: chunks, truncated: false, truncatedChars: 0, totalChars, selectedChars: totalChars, totalChunks: chunks.length, selectedChunks: chunks.length };
+  }
+  const promptLower = userPrompt.toLowerCase();
+  const promptWords = new Set(promptLower.split(/\s+/).filter((w) => w.length > 3));
+  const scored = chunks.map((chunk) => {
+    let score = 0;
+    for (const h of chunk.headingPath) {
+      const hLower = h.toLowerCase();
+      for (const word of promptWords) {
+        if (hLower.includes(word)) score += 2;
+      }
+    }
+    const contentLower = chunk.content.toLowerCase();
+    for (const word of promptWords) {
+      if (contentLower.includes(word)) score += 1;
+    }
+    return { chunk, score };
+  });
+  scored.sort((a, b) => b.score - a.score || a.chunk.index - b.chunk.index);
+  const selected = [];
+  let selectedChars = 0;
+  for (const { chunk } of scored) {
+    if (selectedChars + chunk.charCount <= budget) {
+      selected.push(chunk);
+      selectedChars += chunk.charCount;
+    }
+  }
+  selected.sort((a, b) => a.sourceNumber - b.sourceNumber || a.index - b.index);
+  const truncatedChars = totalChars - selectedChars;
+  return { selected, truncated: true, truncatedChars, totalChars, selectedChars, totalChunks: chunks.length, selectedChunks: selected.length };
+}
+
 // src/clipbounce/synthesis/bundleSynthesizer.ts
-async function synthesizeBundle(sources, userPrompt, providerName) {
+var CHUNK_BUDGET = 25e3;
+async function synthesizeBundle(sources, userPrompt, config) {
   const spec = compilePromptSpec(userPrompt);
-  const sourceSummaries = await summarizeAllSources(sources, spec, providerName);
-  const provider = getProvider(providerName);
+  const provider = config ? getProviderForConfig(config) : getProviderForConfig({ mode: "mock", backendUrl: "http://localhost:8787" });
+  const sourceSummaries = await summarizeAllSources(sources, spec, provider.name);
+  const readySources = sources.filter((s) => s.status === "ready");
+  const allChunks = [];
+  readySources.forEach((s, i) => {
+    if (s.cleanText) {
+      const chunks = chunkText(s.cleanText, s, i + 1);
+      allChunks.push(...chunks);
+    }
+  });
+  const selection = selectChunksForBudget(allChunks, userPrompt, CHUNK_BUDGET);
+  const formattedSources = selection.selected.length > 0 ? buildChunkFormattedSources(selection.selected, sources) : void 0;
+  const chunkBudget = {
+    totalChars: selection.totalChars,
+    selectedChars: selection.selectedChars,
+    truncated: selection.truncated,
+    truncatedChars: selection.truncatedChars,
+    totalChunks: selection.totalChunks,
+    selectedChunks: selection.selectedChunks
+  };
   const result = await provider.synthesizeBundle({
     prompt: spec,
     sources,
-    sourceSummaries
+    sourceSummaries,
+    formattedSources,
+    chunkBudget
   });
+  result.citations = selection.selected.map((chunk) => ({
+    sourceNumber: chunk.sourceNumber,
+    sourceId: chunk.sourceId,
+    chunkId: chunk.chunkId,
+    headingPath: chunk.headingPath
+  }));
+  if (selection.truncated && !result.synthesis.includes("truncat")) {
+    result.synthesis += `
+
+> *${selection.truncatedChars.toLocaleString()} characters were truncated from source content to fit processing limits. ${selection.selectedChunks} of ${selection.totalChunks} chunks were selected.*`;
+  }
   return result;
 }
 
 // src/extension/background.ts
 var pendingSources = [];
+var providerConfig = { mode: "mock", backendUrl: "http://localhost:8787" };
 async function injectAndExtract(tabId) {
   try {
     await chrome.scripting.executeScript({
@@ -377,7 +751,7 @@ async function handleCaptureAllTabs() {
   return newSources;
 }
 async function handleGenerateSynthesis(sources, prompt) {
-  return synthesizeBundle(sources, prompt);
+  return synthesizeBundle(sources, prompt, providerConfig);
 }
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
@@ -394,6 +768,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           break;
         }
         case "GENERATE_SYNTHESIS": {
+          const config = await loadSettings();
+          providerConfig = config;
+          getRemoteProvider().setBackendUrl(config.backendUrl);
           const result = await handleGenerateSynthesis(message.sources, message.prompt);
           await saveResult(result);
           sendResponse({ type: "SYNTHESIS_COMPLETE", result });
@@ -414,6 +791,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
   })();
   return true;
+});
+loadSettings().then((config) => {
+  providerConfig = config;
+  getRemoteProvider().setBackendUrl(config.backendUrl);
 });
 function delay2(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
