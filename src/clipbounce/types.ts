@@ -59,6 +59,13 @@ export type BundleSynthesisResult = {
   generatedAt: string;
 };
 
+export type ProviderMode = "mock" | "local";
+
+export type ProviderConfig = {
+  mode: ProviderMode;
+  backendUrl: string;
+};
+
 export type ExtractedContent = {
   title: string;
   url: string;

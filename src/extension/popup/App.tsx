@@ -1,7 +1,8 @@
-import { useState, useCallback, useRef } from 'react';
-import type { SourceRecord, BundleSynthesisResult } from '../../clipbounce/types';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import type { SourceRecord, BundleSynthesisResult, ProviderConfig, ProviderMode } from '../../clipbounce/types';
 import type { ExtensionMessage } from '../../clipbounce/messages';
 import { getDomain } from '../../utils/url';
+import { loadSettings, saveSettings } from '../../clipbounce/storage/settingsStore';
 import './App.css';
 
 type AppStatus = 'idle' | 'capturing' | 'extracting' | 'generating' | 'complete' | 'error';
@@ -21,12 +22,62 @@ export default function App() {
   const [urlText, setUrlText] = useState('');
   const [result, setResult] = useState<BundleSynthesisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<'none' | 'synthesis' | 'report'>('none');
   const resultRef = useRef<HTMLDivElement>(null);
+
+  const [showSettings, setShowSettings] = useState(false);
+  const [providerMode, setProviderMode] = useState<ProviderMode>('mock');
+  const [backendUrl, setBackendUrl] = useState('http://localhost:8787');
+  const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle');
+  const [connectionMsg, setConnectionMsg] = useState('');
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+
+  useEffect(() => {
+    loadSettings().then((cfg) => {
+      setProviderMode(cfg.mode);
+      setBackendUrl(cfg.backendUrl);
+      setSettingsLoaded(true);
+    });
+  }, []);
+
+  const currentProviderLabel = providerMode === 'mock' ? 'Mock' : 'Local Backend';
 
   const sendMessage = useCallback(async (msg: ExtensionMessage): Promise<any> => {
     return chrome.runtime.sendMessage(msg);
   }, []);
+
+  const persistSettings = useCallback(async (mode: ProviderMode, url: string) => {
+    await saveSettings({ mode, backendUrl: url });
+  }, []);
+
+  const handleModeChange = useCallback((mode: ProviderMode) => {
+    setProviderMode(mode);
+    persistSettings(mode, backendUrl);
+  }, [backendUrl, persistSettings]);
+
+  const handleUrlChange = useCallback((url: string) => {
+    setBackendUrl(url);
+    persistSettings(providerMode, url);
+  }, [providerMode, persistSettings]);
+
+  const testConnection = useCallback(async () => {
+    setConnectionStatus('testing');
+    setConnectionMsg('');
+    try {
+      const resp = await fetch(`${backendUrl}/api/health`, { signal: AbortSignal.timeout(5000) });
+      if (resp.ok) {
+        const data = await resp.json();
+        setConnectionStatus('ok');
+        setConnectionMsg(data.status || 'Connected');
+      } else {
+        setConnectionStatus('fail');
+        setConnectionMsg(`HTTP ${resp.status}`);
+      }
+    } catch (err) {
+      setConnectionStatus('fail');
+      setConnectionMsg(err instanceof Error ? err.message : 'Connection failed');
+    }
+  }, [backendUrl]);
 
   const addCurrentTab = useCallback(async () => {
     setStatus('capturing');
@@ -142,39 +193,143 @@ export default function App() {
     }
   }, [sources, prompt, sendMessage]);
 
-  const copyResult = useCallback(() => {
+  const copySynthesis = useCallback(() => {
+    if (!result) return;
+    navigator.clipboard.writeText(result.synthesis).then(() => {
+      setCopied('synthesis');
+      setTimeout(() => setCopied('none'), 2000);
+    });
+  }, [result]);
+
+  const copyFullReport = useCallback(() => {
     if (!result) return;
     const text = [
-      `# ClipBounce Synthesis`,
+      `# ClipBounce Synthesis Report`,
       `Prompt: ${result.prompt}`,
+      `Generated: ${result.generatedAt}`,
+      `Provider: ${currentProviderLabel}`,
       '',
       result.synthesis,
       '',
       '---',
-      'Source Summaries:',
+      '## Source Summaries',
       ...result.sourceSummaries.map(
         (s, i) =>
-          `\n${i + 1}. ${s.title || s.url}\n   ${s.summary}\n   Key points: ${s.keyPoints.join(', ')}`,
+          `\n### ${i + 1}. ${s.title || s.url}\n${s.summary}\n\nKey points:\n${s.keyPoints.map((kp) => `- ${kp}`).join('\n')}`,
       ),
       ...(result.failures.length > 0
-        ? ['\nFailed sources:', ...result.failures.map((f) => `- ${f.url}: ${f.reason}`)]
+        ? ['\n## Failed Sources', ...result.failures.map((f) => `- ${f.url}: ${f.reason}`)]
         : []),
     ].join('\n');
 
     navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setCopied('report');
+      setTimeout(() => setCopied('none'), 2000);
     });
-  }, [result]);
+  }, [result, currentProviderLabel]);
+
+  const downloadMarkdown = useCallback(() => {
+    if (!result) return;
+    const text = [
+      `# ClipBounce Synthesis Report`,
+      `Prompt: ${result.prompt}`,
+      `Generated: ${result.generatedAt}`,
+      `Provider: ${currentProviderLabel}`,
+      '',
+      result.synthesis,
+      '',
+      '---',
+      '## Source Summaries',
+      ...result.sourceSummaries.map(
+        (s, i) =>
+          `\n### ${i + 1}. ${s.title || s.url}\n${s.summary}\n\nKey points:\n${s.keyPoints.map((kp) => `- ${kp}`).join('\n')}`,
+      ),
+      ...(result.failures.length > 0
+        ? ['\n## Failed Sources', ...result.failures.map((f) => `- ${f.url}: ${f.reason}`)]
+        : []),
+    ].join('\n');
+
+    const blob = new Blob([text], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `clipbounce-report-${Date.now()}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [result, currentProviderLabel]);
 
   const readyCount = sources.filter((s) => s.status === 'ready').length;
 
   return (
     <div className="app">
       <header className="header">
-        <h1 className="title">ClipBounce</h1>
-        <p className="subtitle">Prompt multiple websites at once.</p>
+        <div className="header-top">
+          <h1 className="title">ClipBounce</h1>
+          <button
+            className="btn btn-icon settings-toggle"
+            onClick={() => setShowSettings((s) => !s)}
+            title="Settings"
+          >
+            {showSettings ? '\u2715' : '\u2699'}
+          </button>
+        </div>
+        <p className="subtitle">
+          Prompt multiple websites at once.
+          <span className="provider-badge">{currentProviderLabel}</span>
+        </p>
       </header>
+
+      {showSettings && (
+        <section className="settings-panel">
+          <h3 className="settings-title">Provider Settings</h3>
+          <div className="settings-row">
+            <label className="settings-label">Provider Mode</label>
+            <select
+              className="settings-select"
+              value={providerMode}
+              onChange={(e) => handleModeChange(e.target.value as ProviderMode)}
+            >
+              <option value="mock">Mock (no backend needed)</option>
+              <option value="local">Local Backend</option>
+            </select>
+          </div>
+          {providerMode === 'local' && (
+            <>
+              <div className="settings-row">
+                <label className="settings-label">Backend URL</label>
+                <input
+                  className="settings-input"
+                  type="text"
+                  value={backendUrl}
+                  onChange={(e) => handleUrlChange(e.target.value)}
+                  placeholder="http://localhost:8787"
+                />
+              </div>
+              <div className="settings-row">
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={testConnection}
+                  disabled={connectionStatus === 'testing'}
+                >
+                  {connectionStatus === 'testing' ? 'Testing...' : 'Test Connection'}
+                </button>
+                {connectionStatus === 'ok' && (
+                  <span className="connection-ok">{connectionMsg}</span>
+                )}
+                {connectionStatus === 'fail' && (
+                  <span className="connection-fail">{connectionMsg}</span>
+                )}
+              </div>
+            </>
+          )}
+          {providerMode === 'mock' && (
+            <p className="settings-hint">
+              Using mock provider — all outputs are simulated. Switch to Local Backend and run the
+              server for real AI synthesis.
+            </p>
+          )}
+        </section>
+      )}
 
       <section className="controls">
         <div className="button-row">
@@ -213,9 +368,12 @@ export default function App() {
             Sources ({readyCount} ready of {sources.length})
           </h2>
           <div className="source-list">
-            {sources.map((source) => (
+            {sources.map((source, idx) => (
               <div key={source.id} className={`source-card source-${source.status}`}>
                 <div className="source-card-header">
+                  <span className={`source-number ${source.status === 'ready' ? 'source-number-ready' : ''}`}>
+                    {idx + 1}
+                  </span>
                   <span className={`status-dot status-${source.status}`} />
                   <span className="source-domain">{source.domain || source.url}</span>
                   <button className="btn-icon" onClick={() => removeSource(source.id)} title="Remove source">
@@ -285,32 +443,47 @@ export default function App() {
         <div className="result-section" ref={resultRef}>
           <div className="result-header">
             <h2 className="section-title">Synthesis Result</h2>
-            <button className="btn btn-secondary" onClick={copyResult}>
-              {copied ? 'Copied!' : 'Copy Result'}
-            </button>
+            <div className="result-actions">
+              <button className="btn btn-secondary btn-sm" onClick={copySynthesis}>
+                {copied === 'synthesis' ? 'Copied!' : 'Copy Synthesis'}
+              </button>
+              <button className="btn btn-secondary btn-sm" onClick={copyFullReport}>
+                {copied === 'report' ? 'Copied!' : 'Copy Report'}
+              </button>
+              <button className="btn btn-secondary btn-sm" onClick={downloadMarkdown}>
+                Download MD
+              </button>
+            </div>
           </div>
 
           <div className="result-meta">
             {result.successfulSourceCount} source{result.successfulSourceCount !== 1 ? 's' : ''} analyzed
             {result.failedSourceCount > 0 && `, ${result.failedSourceCount} failed`}
+            {' \u00b7 '}Provider: {currentProviderLabel}
           </div>
 
           <div className="synthesis-content">{renderSynthesis(result.synthesis)}</div>
 
           <h3 className="subsection-title">Per-Source Summaries</h3>
-          {result.sourceSummaries.map((summary) => (
-            <div key={summary.sourceId} className="source-summary-card">
-              <div className="summary-source-title">{summary.title || summary.url}</div>
-              <p className="summary-text">{summary.summary}</p>
-              {summary.keyPoints.length > 0 && (
-                <ul className="key-points">
-                  {summary.keyPoints.map((kp, i) => (
-                    <li key={i}>{kp}</li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          ))}
+          {result.sourceSummaries.map((summary) => {
+            const srcIdx = result.sourceSummaries.indexOf(summary) + 1;
+            return (
+              <div key={summary.sourceId} className="source-summary-card">
+                <div className="summary-source-title">
+                  <span className="summary-source-number">{srcIdx}</span>
+                  {summary.title || summary.url}
+                </div>
+                <p className="summary-text">{summary.summary}</p>
+                {summary.keyPoints.length > 0 && (
+                  <ul className="key-points">
+                    {summary.keyPoints.map((kp, i) => (
+                      <li key={i}>{kp}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })}
 
           {result.failures.length > 0 && (
             <div className="failures-section">

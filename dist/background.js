@@ -93,6 +93,21 @@ async function saveResult(result) {
   await saveSession(session);
 }
 
+// src/clipbounce/storage/settingsStore.ts
+var SETTINGS_KEY = "clipbounce_settings";
+var DEFAULT_SETTINGS = {
+  mode: "mock",
+  backendUrl: "http://localhost:8787"
+};
+async function loadSettings() {
+  try {
+    const result = await chrome.storage.sync.get(SETTINGS_KEY);
+    return result[SETTINGS_KEY] || DEFAULT_SETTINGS;
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
 // src/clipbounce/synthesis/promptCompiler.ts
 var MODE_KEYWORDS = {
   comparison: ["compare", "versus", "vs", "differences", "contrast", "similarities"],
@@ -244,11 +259,160 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// src/clipbounce/synthesis/providers/RemoteProvider.ts
+var RemoteProvider = class {
+  constructor(backendUrl) {
+    this.name = "Remote Provider";
+    this._backendUrl = backendUrl;
+  }
+  get backendUrl() {
+    return this._backendUrl;
+  }
+  setBackendUrl(url) {
+    this._backendUrl = url;
+  }
+  async summarizeSource(input) {
+    const { source } = input;
+    const system = 'You are a source summarizer. Summarize the given web page content concisely. Respond with JSON only: { "summary": "2-3 sentence summary", "keyPoints": ["point1","point2","point3"], "usefulQuotes": ["quote1"] }';
+    const userContent = `Title: ${source.title || "Untitled"}
+URL: ${source.url}
+Domain: ${source.domain || "unknown"}
+Content:
+${(source.cleanText || "").slice(0, 8e3)}`;
+    const response = await this.callAPI(system, userContent);
+    try {
+      const parsed = JSON.parse(response);
+      return {
+        sourceId: source.id,
+        title: source.title,
+        url: source.url,
+        summary: parsed.summary || response.slice(0, 500),
+        keyPoints: Array.isArray(parsed.keyPoints) ? parsed.keyPoints : [],
+        usefulQuotes: Array.isArray(parsed.usefulQuotes) ? parsed.usefulQuotes : void 0
+      };
+    } catch {
+      return {
+        sourceId: source.id,
+        title: source.title,
+        url: source.url,
+        summary: response.slice(0, 500),
+        keyPoints: []
+      };
+    }
+  }
+  async synthesizeBundle(input) {
+    const { prompt, sources, sourceSummaries } = input;
+    const readySources = sources.filter((s) => s.status === "ready");
+    const failedSources = sources.filter((s) => s.status === "failed");
+    const sourceBlocks = sources.map((s, i) => {
+      const idx = i + 1;
+      if (s.status === "ready") {
+        return `[${idx}] ${s.title || "Untitled"}
+URL: ${s.url}
+Domain: ${s.domain || "unknown"}
+Content:
+${(s.cleanText || "").slice(0, 4e3)}`;
+      }
+      return `[${idx}] ${s.title || "Untitled"}
+URL: ${s.url}
+Domain: ${s.domain || "unknown"}
+Status: ${s.status}${s.error ? " - " + s.error : ""}
+[Content not accessible]`;
+    }).join("\n\n---\n\n");
+    const summaryBlocks = sourceSummaries.map((s) => {
+      const srcIdx = sources.findIndex((src) => src.id === s.sourceId) + 1;
+      return `[${srcIdx}] ${s.title || s.url}
+Summary: ${s.summary}
+Key points: ${s.keyPoints.join(", ")}`;
+    }).join("\n\n");
+    const system = "You are ClipBounce, a multi-source web synthesis engine. Answer ONLY from the provided sources below. Do not use any external knowledge or make up information. If the sources do not contain enough information to answer, say so clearly.";
+    const userContent = `User request: ${prompt.userPrompt}
+
+Sources:
+${sourceBlocks}
+
+Per-source summaries:
+${summaryBlocks}
+
+Instructions:
+1. Synthesize an answer using ONLY the provided sources.
+2. Reference sources by their number like [1], [2], etc. in your answer.
+3. Clearly separate repeated ideas (found in multiple sources) from unique ideas (found in only one source).
+4. If some source content is not accessible (marked "[Content not accessible]"), mention it.
+5. If the user's request cannot be answered from the sources, say so.
+
+Return your response in this format:
+
+## Synthesis
+<your synthesized answer with inline references like [1], [2]>
+
+## Repeated Ideas
+- <idea> (mentioned in [1], [2], [3])
+- <idea> (mentioned in [2], [4])
+
+## Unique Ideas
+- <idea> (unique to [1])
+- <idea> (unique to [3])
+
+## Source Notes
+<brief assessment of each source's coverage and relevance>`;
+    const response = await this.callAPI(system, userContent);
+    return {
+      prompt: prompt.userPrompt,
+      sourceCount: sources.length,
+      successfulSourceCount: readySources.length,
+      failedSourceCount: failedSources.length,
+      sourceSummaries,
+      synthesis: response,
+      failures: failedSources.map((s) => ({
+        url: s.url,
+        reason: s.error || "Unknown error"
+      })),
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+  async testConnection() {
+    try {
+      const resp = await fetch(`${this._backendUrl}/api/health`, {
+        signal: AbortSignal.timeout(5e3)
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        return { ok: true, message: data.status || "Connected" };
+      }
+      return { ok: false, message: `HTTP ${resp.status}` };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : "Connection failed" };
+    }
+  }
+  async callAPI(system, userContent) {
+    const resp = await fetch(`${this._backendUrl}/api/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system,
+        messages: [{ role: "user", content: userContent }]
+      }),
+      signal: AbortSignal.timeout(9e4)
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Backend error (${resp.status}): ${text.slice(0, 300)}`);
+    }
+    const data = await resp.json();
+    if (!data.content && typeof data.content !== "string") {
+      throw new Error("Backend returned invalid response: missing content");
+    }
+    return data.content;
+  }
+};
+
 // src/clipbounce/synthesis/providers/index.ts
 var _providers = /* @__PURE__ */ new Map();
+var _remoteProvider = new RemoteProvider("http://localhost:8787");
 function registerDefaultProviders() {
-  const mock = new MockProvider();
-  _providers.set(mock.name, mock);
+  _providers.set("Mock Provider", new MockProvider());
+  _providers.set(_remoteProvider.name, _remoteProvider);
 }
 registerDefaultProviders();
 function getProvider(name) {
@@ -256,6 +420,16 @@ function getProvider(name) {
     return _providers.get(name);
   }
   return _providers.get("Mock Provider");
+}
+function getProviderForConfig(config) {
+  if (config.mode === "local") {
+    _remoteProvider.setBackendUrl(config.backendUrl);
+    return _remoteProvider;
+  }
+  return _providers.get("Mock Provider");
+}
+function getRemoteProvider() {
+  return _remoteProvider;
 }
 
 // src/clipbounce/synthesis/sourceSummarizer.ts
@@ -284,10 +458,10 @@ async function summarizeAllSources(sources, prompt, providerName) {
 }
 
 // src/clipbounce/synthesis/bundleSynthesizer.ts
-async function synthesizeBundle(sources, userPrompt, providerName) {
+async function synthesizeBundle(sources, userPrompt, config) {
   const spec = compilePromptSpec(userPrompt);
-  const sourceSummaries = await summarizeAllSources(sources, spec, providerName);
-  const provider = getProvider(providerName);
+  const provider = config ? getProviderForConfig(config) : getProviderForConfig({ mode: "mock", backendUrl: "http://localhost:8787" });
+  const sourceSummaries = await summarizeAllSources(sources, spec, provider.name);
   const result = await provider.synthesizeBundle({
     prompt: spec,
     sources,
@@ -298,6 +472,7 @@ async function synthesizeBundle(sources, userPrompt, providerName) {
 
 // src/extension/background.ts
 var pendingSources = [];
+var providerConfig = { mode: "mock", backendUrl: "http://localhost:8787" };
 async function injectAndExtract(tabId) {
   try {
     await chrome.scripting.executeScript({
@@ -377,7 +552,7 @@ async function handleCaptureAllTabs() {
   return newSources;
 }
 async function handleGenerateSynthesis(sources, prompt) {
-  return synthesizeBundle(sources, prompt);
+  return synthesizeBundle(sources, prompt, providerConfig);
 }
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
@@ -394,6 +569,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           break;
         }
         case "GENERATE_SYNTHESIS": {
+          const config = await loadSettings();
+          providerConfig = config;
+          getRemoteProvider().setBackendUrl(config.backendUrl);
           const result = await handleGenerateSynthesis(message.sources, message.prompt);
           await saveResult(result);
           sendResponse({ type: "SYNTHESIS_COMPLETE", result });
@@ -414,6 +592,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
   })();
   return true;
+});
+loadSettings().then((config) => {
+  providerConfig = config;
+  getRemoteProvider().setBackendUrl(config.backendUrl);
 });
 function delay2(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

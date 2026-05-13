@@ -1,12 +1,15 @@
 import type { ExtensionMessage, ContentScriptMessage } from '../clipbounce/messages';
-import type { SourceRecord, ExtractedContent, BundleSynthesisResult } from '../clipbounce/types';
+import type { SourceRecord, ExtractedContent, BundleSynthesisResult, ProviderConfig } from '../clipbounce/types';
 import { normalizeUrl, removeDuplicateUrls } from '../utils/url';
 import { createSourceRecord, queryCurrentTab, queryAllTabs } from '../clipbounce/capture/tabCapture';
 import { normalizeText, isTooSmall } from '../clipbounce/extraction/normalizeText';
 import { updateSources, saveResult, clearSession } from '../clipbounce/storage/sessionStore';
+import { loadSettings } from '../clipbounce/storage/settingsStore';
 import { synthesizeBundle } from '../clipbounce/synthesis/bundleSynthesizer';
+import { getRemoteProvider } from '../clipbounce/synthesis/providers';
 
 let pendingSources: SourceRecord[] = [];
+let providerConfig: ProviderConfig = { mode: 'mock', backendUrl: 'http://localhost:8787' };
 
 async function injectAndExtract(tabId: number): Promise<ExtractedContent | null> {
   try {
@@ -147,7 +150,7 @@ async function handleGenerateSynthesis(
   sources: SourceRecord[],
   prompt: string,
 ): Promise<BundleSynthesisResult> {
-  return synthesizeBundle(sources, prompt);
+  return synthesizeBundle(sources, prompt, providerConfig);
 }
 
 chrome.runtime.onMessage.addListener((
@@ -169,6 +172,9 @@ chrome.runtime.onMessage.addListener((
           break;
         }
         case 'GENERATE_SYNTHESIS': {
+          const config = await loadSettings();
+          providerConfig = config;
+          getRemoteProvider().setBackendUrl(config.backendUrl);
           const result = await handleGenerateSynthesis(message.sources, message.prompt);
           await saveResult(result);
           sendResponse({ type: 'SYNTHESIS_COMPLETE', result });
@@ -190,6 +196,11 @@ chrome.runtime.onMessage.addListener((
   })();
 
   return true;
+});
+
+loadSettings().then((config) => {
+  providerConfig = config;
+  getRemoteProvider().setBackendUrl(config.backendUrl);
 });
 
 function delay(ms: number): Promise<void> {

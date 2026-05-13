@@ -1,4 +1,5 @@
-import type { PromptSpec, PromptMode } from '../types';
+import type { PromptSpec, PromptMode, SourceRecord, SourceMiniSummary } from '../types';
+import { getDomain } from '../../utils/url';
 
 const MODE_KEYWORDS: Record<PromptMode, string[]> = {
   comparison: ['compare', 'versus', 'vs', 'differences', 'contrast', 'similarities'],
@@ -53,11 +54,44 @@ function modeInstruction(mode: PromptMode): string {
   }
 }
 
+export function formatSourceForPrompt(source: SourceRecord, index: number): string {
+  const idx = index + 1;
+  const lines: string[] = [
+    `[${idx}] ${source.title || 'Untitled'}`,
+    `URL: ${source.url}`,
+    `Domain: ${source.domain || getDomain(source.url)}`,
+  ];
+  if (source.status === 'ready' && source.cleanText) {
+    lines.push('', source.cleanText.slice(0, 5000));
+  } else if (source.status === 'failed') {
+    lines.push('', `[Content not accessible: ${source.error || 'Unknown error'}]`);
+  } else {
+    lines.push('', '[Content not yet extracted]');
+  }
+  return lines.join('\n');
+}
+
+export function formatSourceSummariesForPrompt(
+  summaries: SourceMiniSummary[],
+  sources: SourceRecord[],
+): string {
+  return summaries
+    .map((s) => {
+      const idx = sources.findIndex((src) => src.id === s.sourceId) + 1;
+      return `[${idx}] ${s.title || s.url}\nSummary: ${s.summary}\nKey points: ${s.keyPoints.join(', ')}`;
+    })
+    .join('\n\n');
+}
+
 export function buildModelPrompt(
   userPrompt: string,
   spec: PromptSpec,
-  sourceSummaries: string,
+  sources: SourceRecord[],
+  sourceSummaries: SourceMiniSummary[],
 ): string {
+  const sourceBlocks = sources.map((s, i) => formatSourceForPrompt(s, i)).join('\n\n---\n\n');
+  const summaryBlocks = formatSourceSummariesForPrompt(sourceSummaries, sources);
+
   return `SYSTEM:
 ${SYSTEM_PROMPT}
 
@@ -69,15 +103,18 @@ Mode: ${spec.mode}
 ${modeInstruction(spec.mode)}
 
 Sources:
-${sourceSummaries}
+${sourceBlocks}
+
+Source summaries:
+${summaryBlocks}
 
 Instructions:
 1. Identify the overall pattern across the sources.
 2. Separate repeated ideas from unique ideas.
 3. Prioritize information that directly answers the user request.
 4. Do not fabricate details not present in the sources.
-5. Mention source titles/domains when useful.
-6. If some sources failed, briefly list them at the end.
+5. Reference sources by their number [1], [2], etc.
+6. If some sources failed or are inaccessible, mention them.
 7. Produce a clean answer in the most appropriate format.
 
 Return:

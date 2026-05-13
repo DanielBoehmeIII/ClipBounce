@@ -1,17 +1,17 @@
-import type { BundleSynthesisResult, SourceRecord, PromptSpec, SourceMiniSummary } from '../types';
+import type { BundleSynthesisResult, SourceRecord, PromptSpec, ProviderConfig } from '../types';
 import { compilePromptSpec } from './promptCompiler';
 import { summarizeAllSources } from './sourceSummarizer';
-import { getProvider } from './providers';
+import { getProviderForConfig } from './providers';
 
 export async function synthesizeBundle(
   sources: SourceRecord[],
   userPrompt: string,
-  providerName?: string,
+  config?: ProviderConfig,
 ): Promise<BundleSynthesisResult> {
   const spec = compilePromptSpec(userPrompt);
-  const sourceSummaries = await summarizeAllSources(sources, spec, providerName);
+  const provider = config ? getProviderForConfig(config) : getProviderForConfig({ mode: 'mock', backendUrl: 'http://localhost:8787' });
+  const sourceSummaries = await summarizeAllSources(sources, spec, provider.name);
 
-  const provider = getProvider(providerName);
   const result = await provider.synthesizeBundle({
     prompt: spec,
     sources,
