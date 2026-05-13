@@ -3,6 +3,8 @@ import type { SourceRecord, BundleSynthesisResult, ExtractedContent } from './ty
 export type ExtensionMessage =
   | { type: 'CAPTURE_CURRENT_TAB' }
   | { type: 'CAPTURE_ALL_TABS' }
+  | { type: 'CAPTURE_SELECTED_TABS' }
+  | { type: 'CAPTURE_PASTED_URLS'; urlText: string }
   | { type: 'CAPTURE_TABS_RESULT'; sources: SourceRecord[] }
   | { type: 'EXTRACT_TAB'; tabId: number; sourceId: string }
   | { type: 'EXTRACTED_CONTENT'; sourceId: string; content: ExtractedContent }

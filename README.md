@@ -4,12 +4,15 @@ Prompt multiple websites at once. Select sources, ask anything, get a multi-sour
 
 ## Features
 
-- **Capture sources** — current tab, all tabs, or paste URLs
+- **Capture sources** — current tab, all tabs, selected tabs, or paste URLs
 - **Extract readable text** — strips nav/ads/footers, collapses whitespace
 - **Multi-source synthesis** — AI-powered answers grounded in your sources
-- **Two provider modes**:
-  - **Mock** (default) — fake structured output, no backend needed
-  - **Local Backend** — real AI via Anthropic Claude or OpenAI GPT
+- **Provider options**:
+  - **Mock** (default) — fake structured output, no backend needed, no API keys
+  - **Local Backend** — real AI via the local backend server
+    - Anthropic Claude (paid API key required)
+    - OpenAI GPT (paid API key required)
+    - **Local LLM** — free, no paid API key needed (LM Studio / Ollama)
 - **Source numbering** — each source gets a number; synthesis references sources by number
 - **Export** — copy synthesis text, copy full report, download Markdown
 - **Prompt presets** — summary, comparison, extraction, unique ideas, study notes
@@ -34,8 +37,8 @@ src/
     url.ts, hash.ts      — URL normalization, ID generation
 server/                  — local backend for real AI synthesis
   index.ts               — Express server
-  providers/             — AnthropicServerProvider, OpenAIServerProvider
-  .env.example           — API key template
+  providers/             — AnthropicServerProvider, OpenAIServerProvider, OpenAICompatibleLocalProvider
+  .env.example           — environment variable template
 ```
 
 ## Quick Start
@@ -55,34 +58,78 @@ Output goes to `dist/`.
 2. Enable Developer Mode
 3. Load unpacked → select `dist/`
 
-### 3. Use Mock Mode (no backend)
+### 3. Use Mock Mode (no backend, no API keys)
 
 - The extension defaults to **Mock Provider** mode
 - All outputs are simulated — useful for testing the UI and capture flow
-- A "Mock" badge appears in the header
+- A **Mock** badge appears in the header
 - Settings panel shows the current mode
+- No server, no API keys needed
 
-### 4. Run local backend for real AI
+### 4. Run local backend with a paid AI provider
 
 ```bash
 cd server
 cp .env.example .env
 # Edit .env — set your API key:
-#   ANTHROPIC_API_KEY=sk-ant-...
-#   or OPENAI_API_KEY=sk-...
+#   ANTHROPIC_API_KEY=sk-ant-...   or
+#   OPENAI_API_KEY=sk-...
 npm install
 npm run dev
 ```
 
 The server starts at `http://localhost:8787`.
 
-### 5. Switch to Local Backend in the extension
+### 5. Run local backend with LM Studio (free, no API keys)
+
+This is the recommended flow for testing without any paid API keys.
+
+#### a. Start LM Studio
+
+1. Download and install [LM Studio](https://lmstudio.ai/)
+2. Open LM Studio and load a model (e.g., Mistral, Llama 3, Phi-3)
+3. Start the local inference server
+   - Go to the **Server** tab
+   - Click **Start Server**
+   - Note the port (default: `http://localhost:1234`)
+
+#### b. Configure ClipBounce server
+
+```bash
+cd server
+cp .env.example .env
+```
+
+Edit `server/.env`:
+
+```env
+AI_PROVIDER=local
+LOCAL_LLM_BASE_URL=http://localhost:1234/v1
+LOCAL_LLM_MODEL=<model-name>     # e.g. mistral-7b-instruct-v0.2
+LOCAL_LLM_API_KEY=lm-studio
+```
+
+Then start the server:
+
+```bash
+npm run dev
+```
+
+#### c. Switch extension to Local Backend
+
+1. Click the gear icon (⚙) in the popup header
+2. Change Provider Mode to **Local Backend**
+3. Keep default URL `http://localhost:8787`
+4. Click **Test Connection** to verify — you should see the provider name and model
+5. Captured sources will now be synthesized by your local model
+
+### 6. Switch to Local Backend for paid providers
 
 1. Click the gear icon (⚙) in the popup header
 2. Change Provider Mode to "Local Backend"
 3. Keep default URL `http://localhost:8787`
 4. Click "Test Connection" to verify
-5. Now all synthesis uses the real AI provider
+5. Now all synthesis uses the configured AI provider
 
 ## Provider Interface
 
@@ -96,9 +143,10 @@ interface AIProvider {
 }
 ```
 
-Two implementations are provided:
+Three implementations are provided:
 - **MockProvider** — template-based, no API calls
 - **RemoteProvider** — sends HTTP requests to the local backend
+- **Local LLM** — free, local model via LM Studio/Ollama
 
 Register custom providers in `src/clipbounce/synthesis/providers/index.ts`.
 
@@ -132,7 +180,19 @@ Check server status and configured provider.
 {
   "status": "ok",
   "provider": "anthropic",
+  "model": "claude-sonnet-4-20250514",
   "message": "AI provider configured"
+}
+```
+
+For local LLM mode:
+```json
+{
+  "status": "ok",
+  "provider": "local",
+  "model": "mistral-7b-instruct-v0.2",
+  "baseURL": "http://localhost:1234/v1",
+  "message": "Local LLM provider configured"
 }
 ```
 
@@ -140,13 +200,21 @@ Check server status and configured provider.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `ANTHROPIC_API_KEY` | One of | — | Anthropic API key |
-| `OPENAI_API_KEY` | One of | — | OpenAI API key |
+| `ANTHROPIC_API_KEY` | One paid or `AI_PROVIDER=local` | — | Anthropic API key |
+| `OPENAI_API_KEY` | One paid or `AI_PROVIDER=local` | — | OpenAI API key |
 | `ANTHROPIC_MODEL` | No | `claude-sonnet-4-20250514` | Anthropic model |
 | `OPENAI_MODEL` | No | `gpt-4o` | OpenAI model |
+| `AI_PROVIDER` | No | — | Set to `local` for LM Studio/Ollama |
+| `LOCAL_LLM_BASE_URL` | For local mode | `http://localhost:1234/v1` | Local LLM endpoint |
+| `LOCAL_LLM_MODEL` | For local mode | — | Model name (e.g. `mistral-7b-instruct-v0.2`) |
+| `LOCAL_LLM_API_KEY` | No | `lm-studio` | API key for local endpoint |
 | `PORT` | No | `8787` | Server port |
 
-Anthropic takes precedence if both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are set.
+Provider selection priority:
+1. `AI_PROVIDER=local` → uses the local LLM (no paid API key needed)
+2. `ANTHROPIC_API_KEY` is set → uses Anthropic Claude
+3. `OPENAI_API_KEY` is set → uses OpenAI GPT
+4. None → returns an error guiding you to configure a provider
 
 ## Prompt Reference
 

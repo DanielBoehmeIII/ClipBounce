@@ -1,11 +1,10 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import type { SourceRecord, BundleSynthesisResult, ProviderConfig, ProviderMode } from '../../clipbounce/types';
+import type { SourceRecord, BundleSynthesisResult, ProviderMode } from '../../clipbounce/types';
 import type { ExtensionMessage } from '../../clipbounce/messages';
-import { getDomain } from '../../utils/url';
 import { loadSettings, saveSettings } from '../../clipbounce/storage/settingsStore';
 import './App.css';
 
-type AppStatus = 'idle' | 'capturing' | 'extracting' | 'generating' | 'complete' | 'error';
+type AppStatus = 'idle' | 'capturing' | 'generating' | 'complete' | 'error';
 
 const PRESETS = [
   { label: 'Beginner summary', prompt: 'Summarize these websites for a beginner.' },
@@ -15,6 +14,30 @@ const PRESETS = [
   { label: 'Study notes', prompt: 'Make study notes from these pages.' },
 ];
 
+function getBatchSummary(sources: SourceRecord[]): string {
+  const ready = sources.filter(s => s.status === 'ready').length;
+  const partial = sources.filter(s => s.status === 'partial').length;
+  const failed = sources.filter(s => s.status === 'failed').length;
+  const skipped = sources.filter(s => s.status === 'skipped').length;
+  const parts: string[] = [];
+  if (ready > 0) parts.push(`${ready} ready`);
+  if (partial > 0) parts.push(`${partial} partial`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  if (skipped > 0) parts.push(`${skipped} skipped`);
+  return parts.join(', ');
+}
+
+function formatErrorMessage(err: unknown): string {
+  const msg = typeof err === 'string' ? err : (err instanceof Error ? err.message : '');
+  if (/Failed to fetch|NetworkError|Network request failed|Load failed|TypeError.*fetch|abort|timeout/i.test(msg)) {
+    return 'Local backend is not reachable. Switch to Mock mode or start the backend.';
+  }
+  if (/401|authentication_error|invalid x-api-key|missing api key|unauthorized|paid api key|mock\/local/i.test(msg)) {
+    return 'Paid API key is missing or invalid. Switch to Mock/local mode or set a valid key.';
+  }
+  return msg || 'An unknown error occurred.';
+}
+
 export default function App() {
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [status, setStatus] = useState<AppStatus>('idle');
@@ -23,6 +46,7 @@ export default function App() {
   const [result, setResult] = useState<BundleSynthesisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<'none' | 'synthesis' | 'report'>('none');
+  const [progressMessage, setProgressMessage] = useState('');
   const resultRef = useRef<HTMLDivElement>(null);
 
   const [showSettings, setShowSettings] = useState(false);
@@ -30,14 +54,12 @@ export default function App() {
   const [backendUrl, setBackendUrl] = useState('http://localhost:8787');
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle');
   const [connectionMsg, setConnectionMsg] = useState('');
-  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [expandedText, setExpandedText] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     loadSettings().then((cfg) => {
       setProviderMode(cfg.mode);
       setBackendUrl(cfg.backendUrl);
-      setSettingsLoaded(true);
     });
   }, []);
 
@@ -80,80 +102,67 @@ export default function App() {
     }
   }, [backendUrl]);
 
-  const addCurrentTab = useCallback(async () => {
+  const startCapture = useCallback(async (msg: ExtensionMessage, progress: string, emptyMessage?: string) => {
     setStatus('capturing');
+    setProgressMessage(progress);
     setError(null);
-    const resp = await sendMessage({ type: 'CAPTURE_CURRENT_TAB' });
-    if (resp.type === 'CAPTURE_TABS_RESULT') {
-      setSources((prev) => [...prev, ...resp.sources]);
+    try {
+      const resp = await sendMessage(msg);
+      if (resp.type === 'CAPTURE_TABS_RESULT' && resp.sources) {
+        if (resp.sources.length === 0 && emptyMessage) {
+          setError(emptyMessage);
+        } else {
+          setSources((prev) => {
+            const existing = new Set(prev.map(s => s.url));
+            const newOnes = resp.sources.filter((s: SourceRecord) => !existing.has(s.url));
+            return [...prev, ...newOnes];
+          });
+        }
+      }
+    } catch (err) {
+      setError(formatErrorMessage(err));
     }
     setStatus('idle');
+    setProgressMessage('');
   }, [sendMessage]);
 
-  const addAllTabs = useCallback(async () => {
-    setStatus('capturing');
-    setError(null);
-    const resp = await sendMessage({ type: 'CAPTURE_ALL_TABS' });
-    if (resp.type === 'CAPTURE_TABS_RESULT') {
-      setSources((prev) => [...prev, ...resp.sources]);
-    }
-    setStatus('idle');
-  }, [sendMessage]);
+  const addCurrentTab = useCallback(() => {
+    startCapture({ type: 'CAPTURE_CURRENT_TAB' }, 'Adding current tab...');
+  }, [startCapture]);
+
+  const addAllTabs = useCallback(() => {
+    startCapture({ type: 'CAPTURE_ALL_TABS' }, 'Adding all tabs...');
+  }, [startCapture]);
+
+  const addSelectedTabs = useCallback(() => {
+    startCapture(
+      { type: 'CAPTURE_SELECTED_TABS' },
+      'Adding selected tabs...',
+      'No highlighted tabs found. Select tabs by holding Ctrl/Cmd and clicking them, then try again.',
+    );
+  }, [startCapture]);
 
   const addPastedUrls = useCallback(async () => {
-    const urls = urlText
-      .split('\n')
-      .map((u) => u.trim())
-      .filter(Boolean);
-    if (urls.length === 0) return;
-
+    if (!urlText.trim()) return;
     setStatus('capturing');
+    setProgressMessage('Processing pasted URLs...');
     setError(null);
-
-    const newSources: SourceRecord[] = urls.map((url) => ({
-      id: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
-      url,
-      title: undefined,
-      domain: getDomain(url),
-      captureMethod: 'pasted_url',
-      status: 'extracting',
-      capturedAt: new Date().toISOString(),
-    }));
-
-    setSources((prev) => [...prev, ...newSources]);
-
-    for (const source of newSources) {
-      try {
-        const resp = await fetch(source.url, { signal: AbortSignal.timeout(10000) });
-        const html = await resp.text();
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(html, 'text/html');
-        const text = doc.body?.textContent?.trim() || '';
-
-        if (text.length < 50) {
-          source.status = 'failed';
-          source.error = 'Content too short or empty.';
-        } else {
-          const clean = text
-            .replace(/\t/g, ' ')
-            .replace(/\n{3,}/g, '\n\n')
-            .replace(/[ \t]{2,}/g, ' ')
-            .trim();
-          source.status = 'ready';
-          source.title = doc.title?.trim() || undefined;
-          source.cleanText = clean.slice(0, 50000);
-          source.charCount = clean.length;
-        }
-      } catch (err) {
-        source.status = 'failed';
-        source.error = err instanceof Error ? err.message : 'Failed to fetch';
+    try {
+      const resp = await sendMessage({ type: 'CAPTURE_PASTED_URLS', urlText: urlText.trim() });
+      if (resp.type === 'CAPTURE_TABS_RESULT' && resp.sources) {
+        setSources((prev) => {
+          const existing = new Set(prev.map(s => s.url));
+          const newOnes = resp.sources.filter((s: SourceRecord) => !existing.has(s.url));
+          return [...prev, ...newOnes];
+        });
+        setUrlText('');
       }
+    } catch (err) {
+      setError(formatErrorMessage(err));
     }
-
-    setSources((prev) => [...prev]);
-    setUrlText('');
     setStatus('idle');
-  }, [urlText]);
+    setProgressMessage('');
+  }, [urlText, sendMessage]);
 
   const clearSources = useCallback(() => {
     setSources([]);
@@ -180,6 +189,7 @@ export default function App() {
     setStatus('generating');
     setError(null);
     setResult(null);
+    setProgressMessage('Analyzing sources and generating synthesis...');
 
     try {
       const resp = await sendMessage({
@@ -198,9 +208,10 @@ export default function App() {
         throw new Error(resp.error || 'Generation failed');
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
+      setError(formatErrorMessage(err));
       setStatus('error');
     }
+    setProgressMessage('');
   }, [sources, prompt, sendMessage]);
 
   const copySynthesis = useCallback(() => {
@@ -346,6 +357,9 @@ export default function App() {
           <button className="btn btn-primary" onClick={addCurrentTab} disabled={status === 'capturing'}>
             + Add Current Tab
           </button>
+          <button className="btn btn-secondary" onClick={addSelectedTabs} disabled={status === 'capturing'}>
+            + Add Selected Tabs
+          </button>
           <button className="btn btn-secondary" onClick={addAllTabs} disabled={status === 'capturing'}>
             + Add All Tabs
           </button>
@@ -355,10 +369,17 @@ export default function App() {
         </div>
       </section>
 
+      {progressMessage && (
+        <div className="progress-message">
+          <span className="spinner-small" />
+          <span>{progressMessage}</span>
+        </div>
+      )}
+
       <section className="url-input-section">
         <textarea
           className="textarea url-textarea"
-          placeholder="Paste URLs, one per line..."
+          placeholder="Paste URLs separated by new lines or commas..."
           value={urlText}
           onChange={(e) => setUrlText(e.target.value)}
           rows={3}
@@ -375,13 +396,14 @@ export default function App() {
       {sources.length > 0 && (
         <section className="sources-section">
           <h2 className="section-title">
-            Sources ({readyCount} ready of {sources.length})
+            Sources ({sources.length})
+            <span className="source-summary-text">{getBatchSummary(sources)}</span>
           </h2>
           <div className="source-list">
             {sources.map((source, idx) => (
               <div key={source.id} className={`source-card source-${source.status}`}>
                 <div className="source-card-header">
-                  <span className={`source-number ${source.status === 'ready' ? 'source-number-ready' : ''}`}>
+                  <span className={`source-number ${source.status === 'ready' ? 'source-number-ready' : source.status === 'partial' ? 'source-number-partial' : ''}`}>
                     {idx + 1}
                   </span>
                   <span className={`status-dot status-${source.status}`} />
@@ -394,24 +416,30 @@ export default function App() {
                   {source.url}
                 </div>
                 {source.title && <div className="source-title">{source.title}</div>}
-                {source.status === 'extracting' && <div className="source-status">Extracting...</div>}
+                {source.status === 'pending' && <div className="source-status-text status-text-pending">Pending...</div>}
+                {source.status === 'extracting' && <div className="source-status-text status-text-extracting">Extracting...</div>}
+                {source.status === 'skipped' && source.error && (
+                  <div className="source-error error-skipped">{source.error}</div>
+                )}
                 {source.status === 'failed' && source.error && (
                   <div className="source-error">{source.error}</div>
                 )}
-                {source.status === 'ready' && source.charCount && (
+                {(source.status === 'ready' || source.status === 'partial') && source.charCount !== undefined && (
                   <>
                     <div className="source-chars-bar">
                       <div className="source-chars-fill" style={{ width: Math.min(100, (source.charCount / 5000) * 100) + '%' }} />
                     </div>
                     <div className="source-chars-row">
                       <span className="source-chars">{source.charCount.toLocaleString()} chars</span>
-                      {source.charCount < 500 && (
-                        <span className="source-weak">Partial extraction</span>
+                      {source.status === 'partial' && (
+                        <span className="source-weak-badge">Partial</span>
                       )}
                     </div>
-                    <button className="btn-text-toggle" onClick={() => toggleExpandedText(source.id)}>
-                      {expandedText.has(source.id) ? 'Hide' : 'View'} extracted text
-                    </button>
+                    {source.cleanText && (
+                      <button className="btn-text-toggle" onClick={() => toggleExpandedText(source.id)}>
+                        {expandedText.has(source.id) ? 'Hide' : 'View'} extracted text
+                      </button>
+                    )}
                     {expandedText.has(source.id) && source.cleanText && (
                       <pre className="source-extracted-preview">{source.cleanText.slice(0, 2000)}{source.cleanText.length > 2000 ? '\n...' : ''}</pre>
                     )}
@@ -451,13 +479,6 @@ export default function App() {
       >
         {status === 'generating' ? 'Generating...' : 'Generate Synthesis'}
       </button>
-
-      {status === 'generating' && (
-        <div className="status-bar">
-          <div className="spinner" />
-          <span>Analyzing sources and generating synthesis...</span>
-        </div>
-      )}
 
       {error && (
         <div className="error-banner">

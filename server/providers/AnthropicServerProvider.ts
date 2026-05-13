@@ -13,20 +13,36 @@ export async function complete(
 
   const anthropic = new Anthropic({ apiKey });
 
-  const response = await anthropic.messages.create({
-    model,
-    max_tokens: 4096,
-    system,
-    messages: messages.map((m) => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    })),
-  });
+  try {
+    const response = await anthropic.messages.create({
+      model,
+      max_tokens: 4096,
+      system,
+      messages: messages.map((m) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      })),
+    });
 
-  const block = response.content[0];
-  if (block && block.type === 'text') {
-    return block.text;
+    const block = response.content[0];
+    if (block && block.type === 'text') {
+      return block.text;
+    }
+
+    throw new Error('Unexpected response format from Anthropic API');
+  } catch (err) {
+    if (err instanceof Error) {
+      const lower = err.message.toLowerCase();
+      if (
+        err.message.includes('401') ||
+        lower.includes('authentication') ||
+        lower.includes('api key') ||
+        lower.includes('unauthorized') ||
+        lower.includes('invalid')
+      ) {
+        throw new Error('Paid API key is missing or invalid. Switch to Mock/local mode or set a valid key.');
+      }
+    }
+    throw err;
   }
-
-  throw new Error('Unexpected response format from Anthropic API');
 }

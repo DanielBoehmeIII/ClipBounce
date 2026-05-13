@@ -1,17 +1,55 @@
 // src/utils/url.ts
-function getDomain(url) {
+var UNSUPPORTED_PREFIXES = [
+  "chrome://",
+  "chrome-extension://",
+  "edge://",
+  "brave://",
+  "about:",
+  "devtools://",
+  "view-source:",
+  "about:blank",
+  "chrome.google.com/webstore"
+];
+var TRAILING_PUNCTUATION = /[.,;:!?)]+$/;
+function normalizeUrl(input) {
+  let url = input.trim();
+  if (!url) return null;
+  url = url.replace(TRAILING_PUNCTUATION, "");
+  if (!/^https?:\/\//i.test(url)) {
+    url = "https://" + url;
+  }
   try {
     const u = new URL(url);
-    return u.hostname.replace(/^www\./, "");
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    u.hash = "";
+    const normalized = u.href;
+    if (normalized === "https://" || normalized === "http://") return null;
+    return normalized;
   } catch {
-    return url;
+    return null;
   }
 }
-function normalizeUrl(url) {
+function parseUrlsFromText(text) {
+  const items = text.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+  const seen = /* @__PURE__ */ new Set();
+  const result = [];
+  for (const item of items) {
+    const url = normalizeUrl(item);
+    if (url && !seen.has(url)) {
+      seen.add(url);
+      result.push(url);
+    }
+  }
+  return result;
+}
+function isUnsupportedBrowserUrl(url) {
+  const lower = url.toLowerCase();
+  return UNSUPPORTED_PREFIXES.some((prefix) => lower.startsWith(prefix));
+}
+function getDomain(url) {
   try {
-    const u = new URL(url);
-    u.hash = "";
-    return u.href;
+    const u = new URL(url.startsWith("http") ? url : `https://${url}`);
+    return u.hostname.replace(/^www\./, "");
   } catch {
     return url;
   }
@@ -43,7 +81,11 @@ async function queryCurrentTab() {
 }
 async function queryAllTabs() {
   const tabs = await chrome.tabs.query({});
-  return tabs.filter((t) => t.id && t.url && !t.url.startsWith("chrome://") && !t.url.startsWith("chrome-extension://")).map((t) => ({ id: t.id, url: t.url, title: t.title }));
+  return tabs.filter((t) => t.id && t.url).map((t) => ({ id: t.id, url: t.url, title: t.title }));
+}
+async function querySelectedTabs() {
+  const tabs = await chrome.tabs.query({ currentWindow: true, highlighted: true });
+  return tabs.filter((t) => t.id && t.url).map((t) => ({ id: t.id, url: t.url, title: t.title }));
 }
 
 // src/clipbounce/extraction/normalizeText.ts
@@ -430,7 +472,15 @@ Return your response in this format:
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`Backend error (${resp.status}): ${text.slice(0, 300)}`);
+      const status = resp.status;
+      const lower = text.toLowerCase();
+      if (status === 401 || lower.includes("authentication_error") || lower.includes("invalid x-api-key") || lower.includes("missing api key") || lower.includes("unauthorized") || lower.includes("paid api key") || lower.includes("mock/local")) {
+        throw new Error("Paid API key is missing or invalid. Switch to Mock/local mode or set a valid key.");
+      }
+      if (status === 503 || lower.includes("cannot reach") || lower.includes("econnrefused") || lower.includes("lm studio")) {
+        throw new Error("Local LLM is not reachable. Make sure LM Studio is running with a model loaded.");
+      }
+      throw new Error(`Backend error (${status}): ${text.slice(0, 200)}`);
     }
     const data = await resp.json();
     if (!data.content && typeof data.content !== "string") {
@@ -672,25 +722,86 @@ async function synthesizeBundle(sources, userPrompt, config) {
 // src/extension/background.ts
 var pendingSources = [];
 var providerConfig = { mode: "mock", backendUrl: "http://localhost:8787" };
-async function injectAndExtract(tabId) {
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ["contentScript.js"]
-    });
-  } catch {
-    return null;
+async function injectAndExtract(tabId, timeoutMs = 8e3) {
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs));
+  const extract = (async () => {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["contentScript.js"]
+      });
+    } catch {
+      return null;
+    }
+    await delay2(100);
+    try {
+      const response = await chrome.tabs.sendMessage(
+        tabId,
+        { type: "EXTRACT" }
+      );
+      return response;
+    } catch {
+      return null;
+    }
+  })();
+  return Promise.race([extract, timeout]);
+}
+async function extractTabContent(tabId, source) {
+  const content = await injectAndExtract(tabId);
+  if (content) {
+    const clean = normalizeText(content.text);
+    source.rawText = content.text;
+    source.cleanText = clean;
+    source.charCount = clean.length;
+    source.title = content.title || source.title;
+    if (isTooSmall(clean)) {
+      source.status = "failed";
+      source.error = `Page content is too short or empty (${clean.length} chars).`;
+    } else if (clean.length < 500) {
+      source.status = "partial";
+      source.error = "Weak extraction: under 500 characters.";
+    } else {
+      source.status = "ready";
+    }
+  } else {
+    source.status = "failed";
+    source.error = "Could not inject content script or extract text from this page.";
   }
-  await delay2(100);
-  try {
-    const response = await chrome.tabs.sendMessage(
-      tabId,
-      { type: "EXTRACT" }
-    );
-    return response;
-  } catch {
-    return null;
+}
+function createSkippedSource(url, title, method) {
+  const source = createSourceRecord(url, title, method);
+  source.status = "skipped";
+  source.error = "Unsupported browser page";
+  return source;
+}
+function isDuplicate(url) {
+  const normalized = normalizeUrl(url);
+  if (!normalized) return true;
+  return pendingSources.some((s) => {
+    const existing = normalizeUrl(s.url);
+    return existing === normalized;
+  });
+}
+function createPendingSources(tabs, method) {
+  const newSources = [];
+  for (const tab of tabs) {
+    if (!tab.url) continue;
+    if (isUnsupportedBrowserUrl(tab.url)) {
+      const source2 = createSkippedSource(tab.url, tab.title, method);
+      pendingSources.push(source2);
+      newSources.push(source2);
+      continue;
+    }
+    const normalized = normalizeUrl(tab.url);
+    if (!normalized) continue;
+    if (isDuplicate(normalized)) continue;
+    const source = createSourceRecord(normalized, tab.title, method);
+    source.status = "extracting";
+    source.url = normalized;
+    pendingSources.push(source);
+    newSources.push(source);
   }
+  return newSources;
 }
 async function handleCaptureCurrentTab() {
   const tab = await queryCurrentTab();
@@ -699,56 +810,114 @@ async function handleCaptureCurrentTab() {
   source.status = "extracting";
   pendingSources.push(source);
   await updateSources(pendingSources);
-  const content = await injectAndExtract(tab.id);
-  if (content) {
-    const clean = normalizeText(content.text);
-    if (isTooSmall(clean)) {
-      source.status = "failed";
-      source.error = "Page content is too short or empty.";
-    } else {
-      source.status = "ready";
-      source.title = content.title || source.title;
-      source.rawText = content.text;
-      source.cleanText = clean;
-      source.charCount = clean.length;
-    }
-  } else {
-    source.status = "failed";
-    source.error = "Could not inject content script or extract text.";
-  }
+  await extractTabContent(tab.id, source);
   await updateSources(pendingSources);
   return [source];
 }
 async function handleCaptureAllTabs() {
   const tabs = await queryAllTabs();
+  const newSources = createPendingSources(tabs, "all_tabs");
+  if (newSources.length === 0) return newSources;
+  await updateSources(pendingSources);
+  const extracting = newSources.filter((s) => s.status === "extracting");
+  await Promise.allSettled(
+    extracting.map(async (source) => {
+      const tab = tabs.find((t) => normalizeUrl(t.url || "") === source.url);
+      if (tab && tab.id) {
+        await extractTabContent(tab.id, source);
+      } else {
+        source.status = "failed";
+        source.error = "Tab no longer available.";
+      }
+    })
+  );
+  await updateSources(pendingSources);
+  return newSources;
+}
+async function handleCaptureSelectedTabs() {
+  const tabs = await querySelectedTabs();
+  const newSources = createPendingSources(tabs, "selected_tabs");
+  if (newSources.length === 0) return newSources;
+  await updateSources(pendingSources);
+  const extracting = newSources.filter((s) => s.status === "extracting");
+  await Promise.allSettled(
+    extracting.map(async (source) => {
+      const tab = tabs.find((t) => normalizeUrl(t.url || "") === source.url);
+      if (tab && tab.id) {
+        await extractTabContent(tab.id, source);
+      } else {
+        source.status = "failed";
+        source.error = "Tab no longer available.";
+      }
+    })
+  );
+  await updateSources(pendingSources);
+  return newSources;
+}
+async function handleCapturePastedUrls(urlText) {
+  const urls = parseUrlsFromText(urlText);
   const newSources = [];
-  for (const tab of tabs) {
-    const existing = pendingSources.find((s) => normalizeUrl(s.url) === normalizeUrl(tab.url));
-    if (existing) continue;
-    const source = createSourceRecord(tab.url, tab.title, "all_tabs");
+  for (const url of urls) {
+    if (isDuplicate(url)) continue;
+    const source = createSourceRecord(url, void 0, "pasted_url");
     source.status = "extracting";
     pendingSources.push(source);
     newSources.push(source);
-    const content = await injectAndExtract(tab.id);
-    if (content) {
-      const clean = normalizeText(content.text);
-      if (isTooSmall(clean)) {
-        source.status = "failed";
-        source.error = "Page content is too short or empty.";
-      } else {
-        source.status = "ready";
-        source.title = content.title || source.title;
-        source.rawText = content.text;
+  }
+  if (newSources.length === 0) return newSources;
+  await updateSources(pendingSources);
+  await Promise.allSettled(
+    newSources.map(async (source) => {
+      try {
+        const response = await fetch(source.url, { signal: AbortSignal.timeout(1e4) });
+        if (!response.ok) {
+          source.status = "failed";
+          source.error = `Server returned HTTP ${response.status}. Open in a tab and use Add Current Tab.`;
+          return;
+        }
+        const html = await response.text();
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, "text/html");
+        const title = doc.title?.trim() || void 0;
+        const text = doc.body?.textContent?.trim() || "";
+        if (isTooSmall(text)) {
+          source.status = "failed";
+          source.error = "Fetched content is too short or empty. Open in a tab and use Add Current Tab.";
+          return;
+        }
+        const clean = normalizeText(text);
+        source.rawText = text;
         source.cleanText = clean;
         source.charCount = clean.length;
+        source.title = title;
+        if (clean.length < 500) {
+          source.status = "partial";
+          source.error = "Weak extraction: under 500 characters.";
+        } else {
+          source.status = "ready";
+        }
+      } catch (err) {
+        source.status = "failed";
+        const msg = err instanceof Error ? err.message : "Unknown error";
+        if (/Failed to fetch|NetworkError|Load failed|Network request failed|abort|timeout/i.test(msg)) {
+          source.error = "Could not fetch this URL directly. Open it in a tab and use Add Current Tab.";
+        } else {
+          source.error = msg;
+        }
       }
-    } else {
-      source.status = "failed";
-      source.error = "Could not inject content script or extract text.";
-    }
-  }
+    })
+  );
   await updateSources(pendingSources);
   return newSources;
+}
+function formatSynthesisError(msg) {
+  if (/Failed to fetch|NetworkError|Network request failed|Load failed|abort|TypeError.*fetch/i.test(msg)) {
+    return "Local backend is not reachable at the configured URL. Switch to Mock mode or start the backend.";
+  }
+  if (/401|authentication_error|invalid x-api-key|missing api key|unauthorized|paid api key|mock\/local/i.test(msg)) {
+    return "Paid API key is missing or invalid. Switch to Mock/local mode or set a valid key.";
+  }
+  return msg;
 }
 async function handleGenerateSynthesis(sources, prompt) {
   return synthesizeBundle(sources, prompt, providerConfig);
@@ -767,13 +936,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sendResponse({ type: "CAPTURE_TABS_RESULT", sources });
           break;
         }
+        case "CAPTURE_SELECTED_TABS": {
+          const sources = await handleCaptureSelectedTabs();
+          sendResponse({ type: "CAPTURE_TABS_RESULT", sources });
+          break;
+        }
+        case "CAPTURE_PASTED_URLS": {
+          const sources = await handleCapturePastedUrls(message.urlText);
+          sendResponse({ type: "CAPTURE_TABS_RESULT", sources });
+          break;
+        }
         case "GENERATE_SYNTHESIS": {
           const config = await loadSettings();
           providerConfig = config;
           getRemoteProvider().setBackendUrl(config.backendUrl);
-          const result = await handleGenerateSynthesis(message.sources, message.prompt);
-          await saveResult(result);
-          sendResponse({ type: "SYNTHESIS_COMPLETE", result });
+          try {
+            const result = await handleGenerateSynthesis(message.sources, message.prompt);
+            await saveResult(result);
+            sendResponse({ type: "SYNTHESIS_COMPLETE", result });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Unknown error";
+            sendResponse({ type: "SYNTHESIS_ERROR", error: formatSynthesisError(msg) });
+          }
           break;
         }
         case "PING": {

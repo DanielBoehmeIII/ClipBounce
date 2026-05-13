@@ -3,8 +3,9 @@ import type { ExtractedContent } from '../types';
 const MAX_CHARS = 50_000;
 
 const SELECTOR_REMOVE = [
-  'script', 'style', 'noscript', 'iframe', 'svg',
-  'nav', 'footer', 'header',
+  'script', 'style', 'noscript', 'iframe', 'svg', 'canvas',
+  'nav', 'footer', 'header', 'aside',
+  'form', 'button',
   '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
   '.nav', '.navbar', '.footer', '.sidebar', '.menu',
   '#nav', '#navbar', '#footer', '#sidebar', '#menu',

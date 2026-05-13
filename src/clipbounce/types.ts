@@ -1,11 +1,12 @@
 export type SourceCaptureMethod =
   | "current_tab"
   | "all_tabs"
+  | "selected_tabs"
   | "pasted_url"
   | "highlighted_link"
   | "selected_text";
 
-export type SourceStatus = "pending" | "extracting" | "ready" | "failed";
+export type SourceStatus = "pending" | "extracting" | "ready" | "failed" | "partial" | "skipped";
 
 export type SourceRecord = {
   id: string;

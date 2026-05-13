@@ -183,7 +183,31 @@ Return your response in this format:
 
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`Backend error (${resp.status}): ${text.slice(0, 300)}`);
+      const status = resp.status;
+      const lower = text.toLowerCase();
+
+      if (
+        status === 401 ||
+        lower.includes('authentication_error') ||
+        lower.includes('invalid x-api-key') ||
+        lower.includes('missing api key') ||
+        lower.includes('unauthorized') ||
+        lower.includes('paid api key') ||
+        lower.includes('mock/local')
+      ) {
+        throw new Error('Paid API key is missing or invalid. Switch to Mock/local mode or set a valid key.');
+      }
+
+      if (
+        status === 503 ||
+        lower.includes('cannot reach') ||
+        lower.includes('econnrefused') ||
+        lower.includes('lm studio')
+      ) {
+        throw new Error('Local LLM is not reachable. Make sure LM Studio is running with a model loaded.');
+      }
+
+      throw new Error(`Backend error (${status}): ${text.slice(0, 200)}`);
     }
 
     const data = await resp.json();

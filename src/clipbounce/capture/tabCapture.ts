@@ -29,6 +29,13 @@ export async function queryCurrentTab(): Promise<{ id: number; url: string; titl
 export async function queryAllTabs(): Promise<{ id: number; url: string; title?: string }[]> {
   const tabs = await chrome.tabs.query({});
   return tabs
-    .filter((t) => t.id && t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('chrome-extension://'))
+    .filter((t) => t.id && t.url)
+    .map((t) => ({ id: t.id!, url: t.url!, title: t.title }));
+}
+
+export async function querySelectedTabs(): Promise<{ id: number; url: string; title?: string }[]> {
+  const tabs = await chrome.tabs.query({ currentWindow: true, highlighted: true });
+  return tabs
+    .filter((t) => t.id && t.url)
     .map((t) => ({ id: t.id!, url: t.url!, title: t.title }));
 }
