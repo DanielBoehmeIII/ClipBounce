@@ -448,12 +448,15 @@ Return your response in this format:
   }
   async testConnection() {
     try {
-      const resp = await fetch(`${this._backendUrl}/api/health`, {
+      const resp = await fetch(`${this._backendUrl}/api/health/check`, {
         signal: AbortSignal.timeout(5e3)
       });
       if (resp.ok) {
         const data = await resp.json();
-        return { ok: true, message: data.status || "Connected" };
+        if (data.ready) {
+          return { ok: true, message: `${data.provider} \xB7 ${data.model} \xB7 Ready` };
+        }
+        return { ok: false, message: data.message || "Not ready" };
       }
       return { ok: false, message: `HTTP ${resp.status}` };
     } catch (err) {
@@ -473,12 +476,32 @@ Return your response in this format:
     if (!resp.ok) {
       const text = await resp.text();
       const status = resp.status;
-      const lower = text.toLowerCase();
-      if (status === 401 || lower.includes("authentication_error") || lower.includes("invalid x-api-key") || lower.includes("missing api key") || lower.includes("unauthorized") || lower.includes("paid api key") || lower.includes("mock/local")) {
+      let parsed = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = null;
+      }
+      const errorCode = parsed?.error?.code || "";
+      const errorMessage = parsed?.error?.message || "";
+      const errorDetails = parsed?.error?.details;
+      if (status === 401 || errorCode === "AUTH_INVALID" || errorMessage.toLowerCase().includes("api key")) {
         throw new Error("Paid API key is missing or invalid. Switch to Mock/local mode or set a valid key.");
       }
-      if (status === 503 || lower.includes("cannot reach") || lower.includes("econnrefused") || lower.includes("lm studio")) {
+      if (status === 503 || errorCode === "LOCAL_LLM_UNREACHABLE" || errorCode === "LOCAL_MODEL_MISSING") {
+        if (errorMessage) {
+          throw new Error(errorMessage);
+        }
         throw new Error("Local LLM is not reachable. Make sure LM Studio is running with a model loaded.");
+      }
+      if (status === 400 || errorCode === "NO_PROVIDER" || errorCode === "BAD_REQUEST") {
+        if (errorMessage) {
+          throw new Error(errorMessage);
+        }
+        throw new Error("No backend provider is configured. Use Mock mode or configure LM Studio/Anthropic/OpenAI.");
+      }
+      if (errorMessage) {
+        throw new Error(errorMessage);
       }
       throw new Error(`Backend error (${status}): ${text.slice(0, 200)}`);
     }
@@ -722,6 +745,7 @@ async function synthesizeBundle(sources, userPrompt, config) {
 // src/extension/background.ts
 var pendingSources = [];
 var providerConfig = { mode: "mock", backendUrl: "http://localhost:8787" };
+var CONCURRENCY_LIMIT = 3;
 async function injectAndExtract(tabId, timeoutMs = 8e3) {
   const timeout = new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs));
   const extract = (async () => {
@@ -746,8 +770,38 @@ async function injectAndExtract(tabId, timeoutMs = 8e3) {
   })();
   return Promise.race([extract, timeout]);
 }
+async function injectAndExtractWithFallback(tabId, timeoutMs = 8e3) {
+  const fastFallback = (async () => {
+    await delay2(200);
+    try {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const text = document.body?.innerText || "";
+          return {
+            title: document.title || "",
+            url: location.href,
+            text,
+            headings: Array.from(document.querySelectorAll("h1,h2,h3")).map((h) => h.textContent || ""),
+            charCount: text.length
+          };
+        }
+      });
+      if (result?.result && result.result.text.length > 100) {
+        return result.result;
+      }
+    } catch {
+    }
+    return null;
+  })();
+  const readableExtract = injectAndExtract(tabId, timeoutMs);
+  return Promise.race([readableExtract, fastFallback]);
+}
 async function extractTabContent(tabId, source) {
-  const content = await injectAndExtract(tabId);
+  source.extractionStartedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const content = await injectAndExtractWithFallback(tabId);
+  source.extractionFinishedAt = (/* @__PURE__ */ new Date()).toISOString();
+  source.extractionDurationMs = new Date(source.extractionFinishedAt).getTime() - new Date(source.extractionStartedAt).getTime();
   if (content) {
     const clean = normalizeText(content.text);
     source.rawText = content.text;
@@ -764,8 +818,13 @@ async function extractTabContent(tabId, source) {
       source.status = "ready";
     }
   } else {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    source.extractionFinishedAt = now;
+    if (source.extractionStartedAt) {
+      source.extractionDurationMs = new Date(now).getTime() - new Date(source.extractionStartedAt).getTime();
+    }
     source.status = "failed";
-    source.error = "Could not inject content script or extract text from this page.";
+    source.error = source.extractionDurationMs && source.extractionDurationMs >= 8e3 ? "Extraction timed out after 8s." : "Could not inject content script or extract text from this page.";
   }
 }
 function createSkippedSource(url, title, method) {
@@ -803,6 +862,35 @@ function createPendingSources(tabs, method) {
   }
   return newSources;
 }
+async function extractWithConcurrency(sources, tabs) {
+  const queue = [...sources];
+  const inProgress = /* @__PURE__ */ new Set();
+  let finished = 0;
+  const total = queue.length;
+  async function processOne(source) {
+    const tab = tabs.find((t) => normalizeUrl(t.url || "") === source.url);
+    if (tab && tab.id) {
+      await extractTabContent(tab.id, source);
+    } else {
+      source.status = "failed";
+      source.error = "Tab no longer available.";
+    }
+    finished++;
+    await updateSources(pendingSources);
+  }
+  while (queue.length > 0 || inProgress.size > 0) {
+    while (queue.length > 0 && inProgress.size < CONCURRENCY_LIMIT) {
+      const source = queue.shift();
+      const promise = processOne(source).finally(() => {
+        inProgress.delete(promise);
+      });
+      inProgress.add(promise);
+    }
+    if (inProgress.size > 0) {
+      await Promise.race(inProgress);
+    }
+  }
+}
 async function handleCaptureCurrentTab() {
   const tab = await queryCurrentTab();
   if (!tab) return [];
@@ -820,17 +908,7 @@ async function handleCaptureAllTabs() {
   if (newSources.length === 0) return newSources;
   await updateSources(pendingSources);
   const extracting = newSources.filter((s) => s.status === "extracting");
-  await Promise.allSettled(
-    extracting.map(async (source) => {
-      const tab = tabs.find((t) => normalizeUrl(t.url || "") === source.url);
-      if (tab && tab.id) {
-        await extractTabContent(tab.id, source);
-      } else {
-        source.status = "failed";
-        source.error = "Tab no longer available.";
-      }
-    })
-  );
+  await extractWithConcurrency(extracting, tabs);
   await updateSources(pendingSources);
   return newSources;
 }
@@ -840,17 +918,7 @@ async function handleCaptureSelectedTabs() {
   if (newSources.length === 0) return newSources;
   await updateSources(pendingSources);
   const extracting = newSources.filter((s) => s.status === "extracting");
-  await Promise.allSettled(
-    extracting.map(async (source) => {
-      const tab = tabs.find((t) => normalizeUrl(t.url || "") === source.url);
-      if (tab && tab.id) {
-        await extractTabContent(tab.id, source);
-      } else {
-        source.status = "failed";
-        source.error = "Tab no longer available.";
-      }
-    })
-  );
+  await extractWithConcurrency(extracting, tabs);
   await updateSources(pendingSources);
   return newSources;
 }
@@ -868,6 +936,7 @@ async function handleCapturePastedUrls(urlText) {
   await updateSources(pendingSources);
   await Promise.allSettled(
     newSources.map(async (source) => {
+      source.extractionStartedAt = (/* @__PURE__ */ new Date()).toISOString();
       try {
         const response = await fetch(source.url, { signal: AbortSignal.timeout(1e4) });
         if (!response.ok) {
@@ -903,6 +972,11 @@ async function handleCapturePastedUrls(urlText) {
           source.error = "Could not fetch this URL directly. Open it in a tab and use Add Current Tab.";
         } else {
           source.error = msg;
+        }
+      } finally {
+        source.extractionFinishedAt = (/* @__PURE__ */ new Date()).toISOString();
+        if (source.extractionStartedAt) {
+          source.extractionDurationMs = new Date(source.extractionFinishedAt).getTime() - new Date(source.extractionStartedAt).getTime();
         }
       }
     })

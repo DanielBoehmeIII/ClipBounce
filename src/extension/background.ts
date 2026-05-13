@@ -11,6 +11,8 @@ import { getRemoteProvider } from '../clipbounce/synthesis/providers';
 let pendingSources: SourceRecord[] = [];
 let providerConfig: ProviderConfig = { mode: 'mock', backendUrl: 'http://localhost:8787' };
 
+const CONCURRENCY_LIMIT = 3;
+
 async function injectAndExtract(tabId: number, timeoutMs = 8000): Promise<ExtractedContent | null> {
   const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs));
 
@@ -40,8 +42,44 @@ async function injectAndExtract(tabId: number, timeoutMs = 8000): Promise<Extrac
   return Promise.race([extract, timeout]);
 }
 
+async function injectAndExtractWithFallback(tabId: number, timeoutMs = 8000): Promise<ExtractedContent | null> {
+  const fastFallback = (async () => {
+    await delay(200);
+    try {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const text = document.body?.innerText || '';
+          return {
+            title: document.title || '',
+            url: location.href,
+            text,
+            headings: Array.from(document.querySelectorAll('h1,h2,h3')).map((h) => h.textContent || ''),
+            charCount: text.length,
+          };
+        },
+      });
+      if (result?.result && result.result.text.length > 100) {
+        return result.result as ExtractedContent;
+      }
+    } catch {
+      // fallback failed, allow main extraction to proceed
+    }
+    return null;
+  })();
+
+  const readableExtract = injectAndExtract(tabId, timeoutMs);
+
+  return Promise.race([readableExtract, fastFallback]);
+}
+
 async function extractTabContent(tabId: number, source: SourceRecord): Promise<void> {
-  const content = await injectAndExtract(tabId);
+  source.extractionStartedAt = new Date().toISOString();
+
+  const content = await injectAndExtractWithFallback(tabId);
+
+  source.extractionFinishedAt = new Date().toISOString();
+  source.extractionDurationMs = new Date(source.extractionFinishedAt).getTime() - new Date(source.extractionStartedAt).getTime();
 
   if (content) {
     const clean = normalizeText(content.text);
@@ -60,8 +98,15 @@ async function extractTabContent(tabId: number, source: SourceRecord): Promise<v
       source.status = 'ready';
     }
   } else {
+    const now = new Date().toISOString();
+    source.extractionFinishedAt = now;
+    if (source.extractionStartedAt) {
+      source.extractionDurationMs = new Date(now).getTime() - new Date(source.extractionStartedAt).getTime();
+    }
     source.status = 'failed';
-    source.error = 'Could not inject content script or extract text from this page.';
+    source.error = source.extractionDurationMs && source.extractionDurationMs >= 8000
+      ? 'Extraction timed out after 8s.'
+      : 'Could not inject content script or extract text from this page.';
   }
 }
 
@@ -111,6 +156,43 @@ function createPendingSources(
   return newSources;
 }
 
+async function extractWithConcurrency(
+  sources: SourceRecord[],
+  tabs: { id: number; url: string; title?: string }[],
+): Promise<void> {
+  const queue = [...sources];
+  const inProgress = new Set<Promise<void>>();
+
+  let finished = 0;
+  const total = queue.length;
+
+  async function processOne(source: SourceRecord): Promise<void> {
+    const tab = tabs.find(t => normalizeUrl(t.url || '') === source.url);
+    if (tab && tab.id) {
+      await extractTabContent(tab.id, source);
+    } else {
+      source.status = 'failed';
+      source.error = 'Tab no longer available.';
+    }
+    finished++;
+    await updateSources(pendingSources);
+  }
+
+  while (queue.length > 0 || inProgress.size > 0) {
+    while (queue.length > 0 && inProgress.size < CONCURRENCY_LIMIT) {
+      const source = queue.shift()!;
+      const promise = processOne(source).finally(() => {
+        inProgress.delete(promise);
+      });
+      inProgress.add(promise);
+    }
+
+    if (inProgress.size > 0) {
+      await Promise.race(inProgress);
+    }
+  }
+}
+
 async function handleCaptureCurrentTab(): Promise<SourceRecord[]> {
   const tab = await queryCurrentTab();
   if (!tab) return [];
@@ -133,17 +215,7 @@ async function handleCaptureAllTabs(): Promise<SourceRecord[]> {
   await updateSources(pendingSources);
 
   const extracting = newSources.filter(s => s.status === 'extracting');
-  await Promise.allSettled(
-    extracting.map(async (source) => {
-      const tab = tabs.find(t => normalizeUrl(t.url || '') === source.url);
-      if (tab && tab.id) {
-        await extractTabContent(tab.id, source);
-      } else {
-        source.status = 'failed';
-        source.error = 'Tab no longer available.';
-      }
-    }),
-  );
+  await extractWithConcurrency(extracting, tabs);
 
   await updateSources(pendingSources);
   return newSources;
@@ -157,17 +229,7 @@ async function handleCaptureSelectedTabs(): Promise<SourceRecord[]> {
   await updateSources(pendingSources);
 
   const extracting = newSources.filter(s => s.status === 'extracting');
-  await Promise.allSettled(
-    extracting.map(async (source) => {
-      const tab = tabs.find(t => normalizeUrl(t.url || '') === source.url);
-      if (tab && tab.id) {
-        await extractTabContent(tab.id, source);
-      } else {
-        source.status = 'failed';
-        source.error = 'Tab no longer available.';
-      }
-    }),
-  );
+  await extractWithConcurrency(extracting, tabs);
 
   await updateSources(pendingSources);
   return newSources;
@@ -191,6 +253,7 @@ async function handleCapturePastedUrls(urlText: string): Promise<SourceRecord[]>
 
   await Promise.allSettled(
     newSources.map(async (source) => {
+      source.extractionStartedAt = new Date().toISOString();
       try {
         const response = await fetch(source.url, { signal: AbortSignal.timeout(10000) });
         if (!response.ok) {
@@ -230,6 +293,11 @@ async function handleCapturePastedUrls(urlText: string): Promise<SourceRecord[]>
           source.error = 'Could not fetch this URL directly. Open it in a tab and use Add Current Tab.';
         } else {
           source.error = msg;
+        }
+      } finally {
+        source.extractionFinishedAt = new Date().toISOString();
+        if (source.extractionStartedAt) {
+          source.extractionDurationMs = new Date(source.extractionFinishedAt).getTime() - new Date(source.extractionStartedAt).getTime();
         }
       }
     }),

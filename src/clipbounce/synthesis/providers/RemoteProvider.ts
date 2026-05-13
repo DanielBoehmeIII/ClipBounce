@@ -157,12 +157,15 @@ Return your response in this format:
 
   async testConnection(): Promise<{ ok: boolean; message: string }> {
     try {
-      const resp = await fetch(`${this._backendUrl}/api/health`, {
+      const resp = await fetch(`${this._backendUrl}/api/health/check`, {
         signal: AbortSignal.timeout(5000),
       });
       if (resp.ok) {
         const data = await resp.json();
-        return { ok: true, message: data.status || 'Connected' };
+        if (data.ready) {
+          return { ok: true, message: `${data.provider} · ${data.model} · Ready` };
+        }
+        return { ok: false, message: data.message || 'Not ready' };
       }
       return { ok: false, message: `HTTP ${resp.status}` };
     } catch (err) {
@@ -184,29 +187,51 @@ Return your response in this format:
     if (!resp.ok) {
       const text = await resp.text();
       const status = resp.status;
-      const lower = text.toLowerCase();
+
+      let parsed: { error?: { code?: string; message?: string; details?: string } } | null = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = null;
+      }
+
+      const errorCode = parsed?.error?.code || '';
+      const errorMessage = parsed?.error?.message || '';
+      const errorDetails = parsed?.error?.details;
 
       if (
         status === 401 ||
-        lower.includes('authentication_error') ||
-        lower.includes('invalid x-api-key') ||
-        lower.includes('missing api key') ||
-        lower.includes('unauthorized') ||
-        lower.includes('paid api key') ||
-        lower.includes('mock/local')
+        errorCode === 'AUTH_INVALID' ||
+        errorMessage.toLowerCase().includes('api key')
       ) {
         throw new Error('Paid API key is missing or invalid. Switch to Mock/local mode or set a valid key.');
       }
 
       if (
         status === 503 ||
-        lower.includes('cannot reach') ||
-        lower.includes('econnrefused') ||
-        lower.includes('lm studio')
+        errorCode === 'LOCAL_LLM_UNREACHABLE' ||
+        errorCode === 'LOCAL_MODEL_MISSING'
       ) {
+        if (errorMessage) {
+          throw new Error(errorMessage);
+        }
         throw new Error('Local LLM is not reachable. Make sure LM Studio is running with a model loaded.');
       }
 
+      if (
+        status === 400 ||
+        errorCode === 'NO_PROVIDER' ||
+        errorCode === 'BAD_REQUEST'
+      ) {
+        if (errorMessage) {
+          throw new Error(errorMessage);
+        }
+        throw new Error('No backend provider is configured. Use Mock mode or configure LM Studio/Anthropic/OpenAI.');
+      }
+
+      if (errorMessage) {
+        throw new Error(errorMessage);
+      }
       throw new Error(`Backend error (${status}): ${text.slice(0, 200)}`);
     }
 

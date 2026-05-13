@@ -30,12 +30,23 @@ function getBatchSummary(sources: SourceRecord[]): string {
 function formatErrorMessage(err: unknown): string {
   const msg = typeof err === 'string' ? err : (err instanceof Error ? err.message : '');
   if (/Failed to fetch|NetworkError|Network request failed|Load failed|TypeError.*fetch|abort|timeout/i.test(msg)) {
-    return 'Local backend is not reachable. Switch to Mock mode or start the backend.';
+    return 'Local backend is not reachable at the configured URL. Switch to Mock mode or start the backend.';
   }
   if (/401|authentication_error|invalid x-api-key|missing api key|unauthorized|paid api key|mock\/local/i.test(msg)) {
     return 'Paid API key is missing or invalid. Switch to Mock/local mode or set a valid key.';
   }
   return msg || 'An unknown error occurred.';
+}
+
+function formatExtractionTiming(source: SourceRecord): string | null {
+  if (source.extractionDurationMs != null) {
+    if (source.extractionDurationMs >= 8000 && source.status === 'failed') {
+      return null;
+    }
+    const seconds = (source.extractionDurationMs / 1000).toFixed(1);
+    return `Extracted in ${seconds}s`;
+  }
+  return null;
 }
 
 export default function App() {
@@ -111,12 +122,52 @@ export default function App() {
       if (resp.type === 'CAPTURE_TABS_RESULT' && resp.sources) {
         if (resp.sources.length === 0 && emptyMessage) {
           setError(emptyMessage);
-        } else {
-          setSources((prev) => {
-            const existing = new Set(prev.map(s => s.url));
-            const newOnes = resp.sources.filter((s: SourceRecord) => !existing.has(s.url));
-            return [...prev, ...newOnes];
-          });
+          setStatus('idle');
+          setProgressMessage('');
+          return;
+        }
+
+        const total = resp.sources.length;
+
+        const needsPolling = resp.sources.some((s: SourceRecord) => s.status === 'extracting');
+
+        setSources((prev) => {
+          const existing = new Set(prev.map(s => s.url));
+          const newOnes = resp.sources.filter((s: SourceRecord) => !existing.has(s.url));
+          return [...prev, ...newOnes];
+        });
+
+        if (needsPolling) {
+          setProgressMessage(`Processing 0 of ${total}...`);
+
+          const poll = setInterval(async () => {
+            try {
+              const session = await chrome.storage.session.get('clipbounce_session');
+              const data = session.clipbounce_session as { sources?: SourceRecord[] } | undefined;
+              if (data?.sources) {
+                setSources((prev) => {
+                  const updated = [...prev];
+                  for (const s of data.sources!) {
+                    const idx = updated.findIndex((u) => u.url === s.url);
+                    if (idx >= 0) updated[idx] = s;
+                  }
+                  return updated;
+                });
+                const done = data.sources.filter((s) => s.status !== 'extracting' && s.status !== 'pending').length;
+                setProgressMessage(`Processing ${done} of ${total}...`);
+                if (done >= total) {
+                  clearInterval(poll);
+                  setStatus('idle');
+                  setProgressMessage('');
+                }
+              }
+            } catch {
+              clearInterval(poll);
+              setStatus('idle');
+              setProgressMessage('');
+            }
+          }, 300);
+          return;
         }
       }
     } catch (err) {
@@ -433,6 +484,9 @@ export default function App() {
                       <span className="source-chars">{source.charCount.toLocaleString()} chars</span>
                       {source.status === 'partial' && (
                         <span className="source-weak-badge">Partial</span>
+                      )}
+                      {source.extractionDurationMs != null && source.extractionDurationMs >= 0 && (
+                        <span className="source-timing">{(source.extractionDurationMs / 1000).toFixed(1)}s</span>
                       )}
                     </div>
                     {source.cleanText && (

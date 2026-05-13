@@ -20,6 +20,9 @@ export type SourceRecord = {
   cleanText?: string;
   charCount?: number;
   capturedAt: string;
+  extractionStartedAt?: string;
+  extractionFinishedAt?: string;
+  extractionDurationMs?: number;
 };
 
 export type PromptMode =

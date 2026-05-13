@@ -43,7 +43,7 @@ server/                  — local backend for real AI synthesis
 
 ## Quick Start
 
-### 1. Build the extension
+### Step 1: Build the extension
 
 ```bash
 npm install
@@ -52,84 +52,111 @@ npm run build
 
 Output goes to `dist/`.
 
-### 2. Load in Chrome
+### Step 2: Load in Chrome
 
 1. Open `chrome://extensions`
 2. Enable Developer Mode
 3. Load unpacked → select `dist/`
 
-### 3. Use Mock Mode (no backend, no API keys)
+### Step 3: Use Mock Mode (no server, no API keys, no LM Studio)
 
-- The extension defaults to **Mock Provider** mode
-- All outputs are simulated — useful for testing the UI and capture flow
-- A **Mock** badge appears in the header
-- Settings panel shows the current mode
-- No server, no API keys needed
+The extension defaults to **Mock Provider** mode. You can try all features immediately:
 
-### 4. Run local backend with a paid AI provider
+- **Capture tabs** — Current Tab, All Tabs, Selected Tabs, pasted URLs
+- **Generate synthesis** — pick a preset or type your own prompt
+- **Export** — copy synthesis, copy report, download Markdown
 
-```bash
-cd server
-cp .env.example .env
-# Edit .env — set your API key:
-#   ANTHROPIC_API_KEY=sk-ant-...   or
-#   OPENAI_API_KEY=sk-...
-npm install
-npm run dev
-```
+Mock mode uses template-based fake output — no server, no API keys, no LM Studio needed.
+A **Mock** badge appears in the popup header. The settings panel shows the current mode.
 
-The server starts at `http://localhost:8787`.
+**This is the recommended first path. Do not set up a server until capture works.**
 
-### 5. Run local backend with LM Studio (free, no API keys)
+### Step 4 (optional): Run the local backend for real AI synthesis
 
-This is the recommended flow for testing without any paid API keys.
+Only do this after you have verified capture works in Mock mode.
 
-#### a. Start LM Studio
+You have three options:
+
+#### Option A: LM Studio (free, local, no paid API key)
 
 1. Download and install [LM Studio](https://lmstudio.ai/)
-2. Open LM Studio and load a model (e.g., Mistral, Llama 3, Phi-3)
-3. Start the local inference server
-   - Go to the **Server** tab
-   - Click **Start Server**
-   - Note the port (default: `http://localhost:1234`)
-
-#### b. Configure ClipBounce server
+2. Open LM Studio, load a model (e.g., Mistral, Llama 3, Phi-3)
+3. Go to the **Server** tab and click **Start Server** (default: `http://localhost:1234`)
+4. Copy the exact model name shown in the Server tab
 
 ```bash
 cd server
 cp .env.example .env
 ```
 
-Edit `server/.env`:
+Edit `server/.env` — uncomment and fill in:
 
 ```env
 AI_PROVIDER=local
 LOCAL_LLM_BASE_URL=http://localhost:1234/v1
-LOCAL_LLM_MODEL=<model-name>     # e.g. mistral-7b-instruct-v0.2
+LOCAL_LLM_MODEL=<exact-model-name>       # e.g. mistral-7b-instruct-v0.2
 LOCAL_LLM_API_KEY=lm-studio
 ```
 
-Then start the server:
+Then:
 
 ```bash
+npm install
 npm run dev
 ```
 
-#### c. Switch extension to Local Backend
+5. Click the gear icon (⚙) in the extension popup
+6. Change Provider Mode to **Local Backend**
+7. Click **Test Connection** to verify
+
+#### Option B: Paid Anthropic API key
+
+```bash
+cd server
+cp .env.example .env
+```
+
+Edit `server/.env` — uncomment and set:
+
+```env
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Then:
+
+```bash
+npm install
+npm run dev
+```
+
+#### Option C: Paid OpenAI API key
+
+```bash
+cd server
+cp .env.example .env
+```
+
+Edit `server/.env` — uncomment and set:
+
+```env
+OPENAI_API_KEY=sk-...
+```
+
+Then:
+
+```bash
+npm install
+npm run dev
+```
+
+### Switching the extension to Local Backend mode
+
+For all server options (A, B, or C):
 
 1. Click the gear icon (⚙) in the popup header
 2. Change Provider Mode to **Local Backend**
 3. Keep default URL `http://localhost:8787`
-4. Click **Test Connection** to verify — you should see the provider name and model
-5. Captured sources will now be synthesized by your local model
-
-### 6. Switch to Local Backend for paid providers
-
-1. Click the gear icon (⚙) in the popup header
-2. Change Provider Mode to "Local Backend"
-3. Keep default URL `http://localhost:8787`
-4. Click "Test Connection" to verify
-5. Now all synthesis uses the configured AI provider
+4. Click **Test Connection** to verify the provider is ready
 
 ## Provider Interface
 
@@ -174,39 +201,83 @@ Response:
 
 ### GET `/api/health`
 
-Check server status and configured provider.
+Check server status and configured provider readiness.
 
 ```json
 {
   "status": "ok",
+  "configured": true,
   "provider": "anthropic",
   "model": "claude-sonnet-4-20250514",
-  "message": "AI provider configured"
+  "ready": true,
+  "message": "Anthropic provider configured."
 }
 ```
 
-For local LLM mode:
+For local LLM mode (not yet tested):
 ```json
 {
   "status": "ok",
+  "configured": true,
   "provider": "local",
   "model": "mistral-7b-instruct-v0.2",
   "baseURL": "http://localhost:1234/v1",
-  "message": "Local LLM provider configured"
+  "ready": false,
+  "message": "Local LLM provider configured. Use /api/health/check to test connectivity."
+}
+```
+
+### GET `/api/health/check`
+
+Actively tests the configured provider. For local LLM, this calls the LM Studio `/models` endpoint.
+
+```json
+{
+  "status": "ok",
+  "configured": true,
+  "provider": "local",
+  "model": "mistral-7b-instruct-v0.2",
+  "baseURL": "http://localhost:1234/v1",
+  "ready": true,
+  "availableModels": ["mistral-7b-instruct-v0.2"],
+  "message": "Local LLM ready: mistral-7b-instruct-v0.2"
+}
+```
+
+### POST `/api/complete` error responses
+
+Errors return structured JSON with status codes:
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `NO_PROVIDER` | No provider configured or bad config |
+| 400 | `BAD_REQUEST` | Missing required fields |
+| 401 | `AUTH_INVALID` | Invalid paid API key |
+| 503 | `LOCAL_LLM_UNREACHABLE` | LM Studio not running |
+| 503 | `LOCAL_MODEL_MISSING` | Model not loaded on LM Studio |
+| 500 | `UNKNOWN` | Unexpected error |
+
+```json
+{
+  "error": {
+    "code": "LOCAL_LLM_UNREACHABLE",
+    "message": "Local LLM server is not reachable at http://localhost:1234/v1. Start LM Studio's local server or switch ClipBounce to Mock mode.",
+    "details": "Cannot reach local LLM at http://localhost:1234/v1..."
+  }
 }
 ```
 
 ## Environment Variables
 
 | Variable | Required | Default | Description |
-|---|---|---|---|
-| `ANTHROPIC_API_KEY` | One paid or `AI_PROVIDER=local` | — | Anthropic API key |
-| `OPENAI_API_KEY` | One paid or `AI_PROVIDER=local` | — | OpenAI API key |
+|---|---|---|---|---|
+| `ANTHROPIC_API_KEY` | For Anthropic mode | — | Anthropic API key |
+| `OPENAI_API_KEY` | For OpenAI mode | — | OpenAI API key |
 | `ANTHROPIC_MODEL` | No | `claude-sonnet-4-20250514` | Anthropic model |
 | `OPENAI_MODEL` | No | `gpt-4o` | OpenAI model |
-| `AI_PROVIDER` | No | — | Set to `local` for LM Studio/Ollama |
+| `AI_PROVIDER` | For local mode | — | Set to `local` for LM Studio/Ollama |
 | `LOCAL_LLM_BASE_URL` | For local mode | `http://localhost:1234/v1` | Local LLM endpoint |
-| `LOCAL_LLM_MODEL` | For local mode | — | Model name (e.g. `mistral-7b-instruct-v0.2`) |
+| `LOCAL_LLM_MODEL` | **Required for local mode** | — | Exact model name loaded in LM Studio (e.g. `mistral-7b-instruct-v0.2`) |
 | `LOCAL_LLM_API_KEY` | No | `lm-studio` | API key for local endpoint |
 | `PORT` | No | `8787` | Server port |
 
@@ -214,7 +285,10 @@ Provider selection priority:
 1. `AI_PROVIDER=local` → uses the local LLM (no paid API key needed)
 2. `ANTHROPIC_API_KEY` is set → uses Anthropic Claude
 3. `OPENAI_API_KEY` is set → uses OpenAI GPT
-4. None → returns an error guiding you to configure a provider
+4. None → returns a structured error guiding you to configure a provider
+
+**Note:** The extension itself defaults to **Mock mode** (no server needed).
+The server only handles real AI synthesis — the extension works without it.
 
 ## Prompt Reference
 
