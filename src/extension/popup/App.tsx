@@ -21,6 +21,10 @@ const PRESETS = [
   { label: 'Study notes', prompt: 'Make study notes from these pages.' },
 ];
 
+const DEFAULT_PROMPT = 'Summarize these sources for a beginner.';
+
+const SINGLE_TAB_PROMPT = 'Summarize this page for a beginner.';
+
 const PANE_COLORS: { label: string; value: PaneColor }[] = [
   { label: 'Blue', value: 'blue' },
   { label: 'Green', value: 'green' },
@@ -86,6 +90,7 @@ export default function App() {
   const [copied, setCopied] = useState<'none' | 'synthesis' | 'report'>('none');
   const [progressMessage, setProgressMessage] = useState('');
   const resultRef = useRef<HTMLDivElement>(null);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
 
   const [showSettings, setShowSettings] = useState(false);
   const [providerMode, setProviderMode] = useState<ProviderMode>('mock');
@@ -109,6 +114,7 @@ export default function App() {
   const [savedSessions, setSavedSessions] = useState<TabPane[]>([]);
   const [showSessions, setShowSessions] = useState(false);
   const [currentPane, setCurrentPane] = useState<TabPane | null>(null);
+  const [boundaryPulse, setBoundaryPulse] = useState<'left' | 'right' | null>(null);
 
   const currentProviderLabel = providerMode === 'mock' ? 'Mock' : 'Local Backend';
 
@@ -147,40 +153,178 @@ export default function App() {
   bufferRef.current = buffer;
   const windowTabsRef = useRef(windowTabs);
   windowTabsRef.current = windowTabs;
+  const sourcesRef = useRef(sources);
+  sourcesRef.current = sources;
+  const promptTextRef = useRef(prompt);
+  promptTextRef.current = prompt;
+
+  const sendMessageRef = useRef<(msg: ExtensionMessage) => Promise<any>>(async () => {});
+  const sendMessage = useCallback(async (msg: ExtensionMessage): Promise<any> => {
+    return chrome.runtime.sendMessage(msg);
+  }, []);
+  sendMessageRef.current = sendMessage;
+
+  const captureBufferedTabs = useCallback(async (): Promise<boolean> => {
+    const buf = bufferRef.current;
+    if (!buf) return false;
+    const count = getBufferedTabCount(buf);
+    const msg: ExtensionMessage = count === 1
+      ? { type: 'CAPTURE_CURRENT_TAB' }
+      : { type: 'CAPTURE_SELECTED_TABS' };
+    try {
+      setStatus('capturing');
+      setProgressMessage('Capturing...');
+      const resp = await sendMessageRef.current(msg);
+      if (resp.type === 'CAPTURE_TABS_RESULT' && resp.sources) {
+        setSources(prev => {
+          const existing = new Set(prev.map(s => s.url));
+          const newOnes = resp.sources.filter((s: SourceRecord) => !existing.has(s.url));
+          return [...prev, ...newOnes];
+        });
+        return resp.sources.length > 0;
+      }
+    } catch {}
+    setStatus('idle');
+    setProgressMessage('');
+    return false;
+  }, [sendMessage]);
+
+  const handleEnterKey = useCallback(async () => {
+    if (sources.length === 0) {
+      await captureBufferedTabs();
+    }
+    promptRef.current?.focus();
+  }, [sources, captureBufferedTabs]);
+
+  const handlePromptEnter = useCallback(() => {
+    const currentSources = sourcesRef.current;
+    if (currentSources.length === 0) {
+      setError('No sources captured. Press Enter in the main view first.');
+      return;
+    }
+    const p = (promptTextRef.current || '').trim() || DEFAULT_PROMPT;
+    generateWithPrompt(currentSources, p);
+  }, []);
+
+  const handleGenerateShortcut = useCallback(async () => {
+    let currentSources = sourcesRef.current;
+    if (currentSources.length === 0) {
+      const captured = await captureBufferedTabs();
+      if (!captured) return;
+      currentSources = sourcesRef.current;
+      if (currentSources.length === 0) return;
+    }
+    const p = (promptTextRef.current || '').trim() || DEFAULT_PROMPT;
+    generateWithPrompt(currentSources, p);
+  }, [captureBufferedTabs]);
+
+  const handleEscape = useCallback(() => {
+    if (showSettings) { setShowSettings(false); return; }
+    if (confirmArchive) { setConfirmArchive(null); return; }
+    if (showSessions) { setShowSessions(false); return; }
+    if (document.activeElement?.tagName.toLowerCase() === 'textarea') {
+      (document.activeElement as HTMLElement).blur();
+    }
+  }, [showSettings, confirmArchive, showSessions]);
+
+  const handleEnterKeyRef = useRef(handleEnterKey);
+  handleEnterKeyRef.current = handleEnterKey;
+  const handleGenerateShortcutRef = useRef(handleGenerateShortcut);
+  handleGenerateShortcutRef.current = handleGenerateShortcut;
+  const handlePromptEnterRef = useRef(handlePromptEnter);
+  handlePromptEnterRef.current = handlePromptEnter;
+  const handleEscapeRef = useRef(handleEscape);
+  handleEscapeRef.current = handleEscape;
+
+  const generateWithPrompt = useCallback(async (srcs: SourceRecord[], pr: string) => {
+    if (srcs.length === 0 || !pr.trim()) return;
+    setStatus('generating');
+    setError(null);
+    setResult(null);
+    setProgressMessage('Analyzing sources and generating synthesis...');
+    try {
+      const resp = await sendMessageRef.current({
+        type: 'GENERATE_SYNTHESIS',
+        sources: srcs,
+        prompt: pr.trim(),
+      });
+      if (resp.type === 'SYNTHESIS_COMPLETE') {
+        setResult(resp.result);
+        setStatus('complete');
+        setTimeout(() => {
+          resultRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 100);
+      } else {
+        throw new Error(resp.error || 'Generation failed');
+      }
+    } catch (err) {
+      setError(formatErrorMessage(err));
+      setStatus('error');
+    }
+    setProgressMessage('');
+  }, [sendMessage]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (isInputFocused()) return;
       const buf = bufferRef.current;
-      if (!buf) return;
+
+      if (isInputFocused()) {
+        const tag = document.activeElement?.tagName.toLowerCase();
+        if (tag === 'textarea' && e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+          e.preventDefault();
+          handlePromptEnterRef.current();
+        }
+        return;
+      }
+
       if (e.key === ' ') {
         e.preventDefault();
+        if (!buf) return;
         const next = toggleBoundary(buf);
         setBuffer(next);
+        setBoundaryPulse(next.activeBoundary);
+        setTimeout(() => setBoundaryPulse(null), 400);
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
+        if (!buf) return;
         const next = buf.activeBoundary === 'left' ? growLeft(buf) : shrinkRight(buf);
         setBuffer(next);
         applyHighlightToChrome(next.windowId, next.leftIndex, next.rightIndex, windowTabsRef.current);
+        setBoundaryPulse(next.activeBoundary);
+        setTimeout(() => setBoundaryPulse(null), 400);
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
+        if (!buf) return;
         const next = buf.activeBoundary === 'right' ? growRight(buf) : shrinkLeft(buf);
         setBuffer(next);
         applyHighlightToChrome(next.windowId, next.leftIndex, next.rightIndex, windowTabsRef.current);
+        setBoundaryPulse(next.activeBoundary);
+        setTimeout(() => setBoundaryPulse(null), 400);
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
         handleCreatePane();
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
         handleReleaseCurrentPane();
+      } else if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        handleEnterKeyRef.current();
+      } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        handleGenerateShortcutRef.current();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        handleEscapeRef.current();
+      } else if (e.key === 'g' || e.key === 'G') {
+        e.preventDefault();
+        handleSmartGroup();
+      } else if (e.key === 's' || e.key === 'S') {
+        e.preventDefault();
+        handleGenerateShortcutRef.current();
       }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, []);
-
-  const sendMessage = useCallback(async (msg: ExtensionMessage): Promise<any> => {
-    return chrome.runtime.sendMessage(msg);
   }, []);
 
   const persistSettings = useCallback(async (mode: ProviderMode, url: string, fast: boolean) => {
@@ -371,6 +515,16 @@ export default function App() {
     }
     setSmartGrouping(false);
   }, [windowTabs, panes]);
+
+  const handlePresetClick = useCallback(async (presetPrompt: string) => {
+    let currentSources = sourcesRef.current;
+    if (currentSources.length === 0) {
+      const captured = await captureBufferedTabs();
+      if (!captured) return;
+      currentSources = sourcesRef.current;
+    }
+    setPrompt(presetPrompt);
+  }, [captureBufferedTabs]);
 
   const handleAutoCreateChip = useCallback((chip: string) => {
     setPrompt(`Help me with ${chip.toLowerCase()}. `);
@@ -573,32 +727,15 @@ export default function App() {
   }, []);
 
   const generate = useCallback(async () => {
-    if (sources.length === 0 || !prompt.trim()) return;
-    setStatus('generating');
-    setError(null);
-    setResult(null);
-    setProgressMessage('Analyzing sources and generating synthesis...');
-    try {
-      const resp = await sendMessage({
-        type: 'GENERATE_SYNTHESIS',
-        sources,
-        prompt: prompt.trim(),
-      });
-      if (resp.type === 'SYNTHESIS_COMPLETE') {
-        setResult(resp.result);
-        setStatus('complete');
-        setTimeout(() => {
-          resultRef.current?.scrollIntoView({ behavior: 'smooth' });
-        }, 100);
-      } else {
-        throw new Error(resp.error || 'Generation failed');
-      }
-    } catch (err) {
-      setError(formatErrorMessage(err));
-      setStatus('error');
+    let currentSources = sources;
+    if (currentSources.length === 0) {
+      await captureBufferedTabs();
+      currentSources = sourcesRef.current;
+      if (currentSources.length === 0) return;
     }
-    setProgressMessage('');
-  }, [sources, prompt, sendMessage]);
+    const p = prompt.trim() || DEFAULT_PROMPT;
+    generateWithPrompt(currentSources, p);
+  }, [sources, prompt, captureBufferedTabs, generateWithPrompt]);
 
   const copySynthesis = useCallback(() => {
     if (!result) return;
@@ -661,7 +798,6 @@ export default function App() {
     URL.revokeObjectURL(url);
   }, [result, currentProviderLabel]);
 
-  const selectedCount = windowTabs.filter(t => t.highlighted).length;
   const bufferedCount = buffer ? getBufferedTabCount(buffer) : 0;
   const rangeLabel = buffer ? getBufferedRangeLabel(buffer) : '';
 
@@ -671,21 +807,18 @@ export default function App() {
       {/* HEADER */}
       <header className="header">
         <div className="header-top">
-          <h1 className="title">ClipBounce</h1>
+          <div className="header-left">
+            <h1 className="title">ClipBounce</h1>
+            <span className="provider-badge">{currentProviderLabel}</span>
+          </div>
           <div className="header-actions">
-            <button className="sp-open-btn" onClick={openSidePanel} title="Open in Chrome side panel for more space">
-              Open Side Panel
-            </button>
+            <kbd className="kbd">Ctrl+Shift+L</kbd>
+            <button className="sp-open-btn" onClick={openSidePanel} title="Open in Chrome side panel for more space">Side Panel</button>
             <span className="badge" onClick={() => toggleSection('settings')} title="Settings">
               {showSettings ? '\u2715' : '\u2699'}
             </span>
-            <kbd className="kbd">Ctrl+Shift+L</kbd>
           </div>
         </div>
-        <p className="subtitle">
-          Prompt multiple websites at once.
-          <span className="provider-badge">{currentProviderLabel}</span>
-        </p>
       </header>
 
       {/* SETTINGS */}
@@ -769,14 +902,24 @@ export default function App() {
         </div>
         {!collapsed.has('selection') && (
           <div className="section-body">
-            <div className="stats-row">
-              <span className="stat"><strong>Selected:</strong> {selectedCount}</span>
-              <span className="stat"><strong>Buffered Range:</strong> {rangeLabel}</span>
-              <span className="stat"><strong>Total Tabs:</strong> {buffer?.totalTabs || 0}</span>
-            </div>
-            <div className="stats-row">
-              <span className="stat"><strong>Active boundary:</strong> {buffer?.activeBoundary || 'right'}</span>
-              <kbd className="kbd kbd-sm">Space to toggle</kbd>
+            <div className="sel-metrics">
+              <div className="sel-metric">
+                <span className="sel-metric-value">{bufferedCount}</span>
+                <span className="sel-metric-label">Buffer</span>
+              </div>
+              <div className="sel-metric">
+                <span className="sel-metric-value" style={{ fontSize: '0.65rem', fontWeight: 500, color: 'var(--text-dim)' }}>{rangeLabel}</span>
+                <span className="sel-metric-label">Range</span>
+              </div>
+              <div className="sel-metric">
+                <span className="sel-metric-value">{buffer?.totalTabs || 0}</span>
+                <span className="sel-metric-label">Total</span>
+              </div>
+              <div className="sel-boundary">
+                <span className={`sel-boundary-pill ${buffer?.activeBoundary === 'left' ? 'sel-boundary-active' : ''} ${boundaryPulse === 'left' ? 'sel-boundary-pulse' : ''}`}>LEFT</span>
+                <span className="sel-boundary-divider">&nbsp;/&nbsp;</span>
+                <span className={`sel-boundary-pill ${buffer?.activeBoundary === 'right' ? 'sel-boundary-active' : ''} ${boundaryPulse === 'right' ? 'sel-boundary-pulse' : ''}`}>RIGHT</span>
+              </div>
             </div>
             {buffer && (
               <div className="range-bar">
@@ -797,10 +940,14 @@ export default function App() {
                 </div>
               </div>
             )}
+            <div className="sel-hints">
+              <span className="sel-hint"><kbd className="kbd kbd-sm">Space</kbd> toggle boundary</span>
+              <span className="sel-hint"><kbd className="kbd kbd-sm">&larr;</kbd> <kbd className="kbd kbd-sm">&rarr;</kbd> adjust range</span>
+            </div>
             <div className="btn-row">
-              <button className="btn btn-primary" onClick={addCurrentTab} disabled={status === 'capturing'}>+ Current</button>
-              <button className="btn" onClick={addSelectedTabs} disabled={status === 'capturing'}>+ Selected</button>
-              <button className="btn" onClick={addAllTabs} disabled={status === 'capturing'}>+ All</button>
+              <button className="btn btn-secondary" onClick={addCurrentTab} disabled={status === 'capturing'}>+ Current</button>
+              <button className="btn btn-secondary" onClick={addSelectedTabs} disabled={status === 'capturing'}>+ Selected</button>
+              <button className="btn btn-secondary" onClick={addAllTabs} disabled={status === 'capturing'}>+ All</button>
               <button className="btn btn-ghost" onClick={clearSources} disabled={sources.length === 0}>Clear</button>
             </div>
           </div>
@@ -816,11 +963,16 @@ export default function App() {
         {!collapsed.has('keyboard') && (
           <div className="section-body">
             <div className="keyboard-grid">
-              <div className="key-item"><kbd className="kbd">Space</kbd> Toggle active boundary</div>
-              <div className="key-item"><kbd className="kbd">&larr;</kbd> Shrink / Grow left</div>
-              <div className="key-item"><kbd className="kbd">&rarr;</kbd> Shrink / Grow right</div>
-              <div className="key-item"><kbd className="kbd">&uarr;</kbd> Create pane from highlighted</div>
+              <div className="key-item"><kbd className="kbd">Enter</kbd> Capture &amp; focus prompt</div>
+              <div className="key-item"><kbd className="kbd">Enter</kbd><span className="key-sub">in prompt</span> Generate</div>
+              <div className="key-item"><kbd className="kbd">&#8984; Enter</kbd> Generate from anywhere</div>
+              <div className="key-item"><kbd className="kbd">&larr;</kbd><kbd className="kbd">&rarr;</kbd> Adjust range</div>
+              <div className="key-item"><kbd className="kbd">Space</kbd> Toggle boundary</div>
+              <div className="key-item"><kbd className="kbd">&uarr;</kbd> Create pane</div>
               <div className="key-item"><kbd className="kbd">&darr;</kbd> Release pane</div>
+              <div className="key-item"><kbd className="kbd">G</kbd> Smart Group</div>
+              <div className="key-item"><kbd className="kbd">S</kbd> Quick summarize</div>
+              <div className="key-item"><kbd className="kbd">Esc</kbd> Close / blur / cancel</div>
             </div>
           </div>
         )}
@@ -976,6 +1128,15 @@ export default function App() {
         </div>
       </section>
 
+      {/* EMPTY STATE */}
+      {sources.length === 0 && status === 'idle' && !result && !error && (
+        <div className="empty-state">
+          <p className="empty-title">No sources captured yet</p>
+          <p className="empty-hint">Press <kbd className="kbd kbd-sm">Enter</kbd> to use the active tab, or highlight tabs and press <kbd className="kbd kbd-sm">Enter</kbd> to build a range.</p>
+          <p className="empty-hint">Or click <strong>+ Current</strong> to add the active tab manually.</p>
+        </div>
+      )}
+
       {/* SOURCES */}
       {sources.length > 0 && (
         <section className="section">
@@ -999,6 +1160,12 @@ export default function App() {
                   <div className="source-url">{source.url}</div>
                   {source.title && <div className="source-title">{source.title}</div>}
                   {source.status === 'failed' && source.error && <div className="source-err">{source.error}</div>}
+                  {source.domain && (source.domain.includes('google.com') || source.domain.includes('docs.google.com')) && source.status === 'partial' && (
+                    <div className="source-notice">Google Docs content may be partial. Select text in the document or export/copy for best results.</div>
+                  )}
+                  {source.domain && (source.domain.includes('chatgpt.com') || source.domain.includes('chat.openai.com')) && (
+                    <div className="source-notice">This page may block extraction. Try copying selected text or using a normal webpage.</div>
+                  )}
                   {(source.status === 'ready' || source.status === 'partial') && source.charCount !== undefined && (
                     <>
                       <div className="char-bar"><div className="char-fill" style={{ width: Math.min(100, (source.charCount / 5000) * 100) + '%' }} /></div>
@@ -1025,20 +1192,40 @@ export default function App() {
       )}
 
       {/* SYNTHESIS */}
-      <section className="section">
+      <section className="section synthesis-section">
         <div className="section-header">
           <h2 className="section-label">SYNTHESIS</h2>
         </div>
         <div className="section-body">
-          <textarea className="textarea prompt-textarea" placeholder="Ask ClipBounce what to do with these websites..." value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} />
-          <div className="presets">
-            {PRESETS.map(p => (
-              <button key={p.label} className="preset-btn" onClick={() => setPrompt(p.prompt)}>{p.label}</button>
-            ))}
+          <textarea
+            ref={promptRef}
+            className="textarea prompt-textarea"
+            placeholder={sources.length === 0 ? 'Press Enter to use the active tab, or highlight tabs to build a range.' : sources.length === 1 ? SINGLE_TAB_PROMPT : 'Ask ClipBounce what to do with these tabs\u2026'}
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            rows={2}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                generate();
+              } else if (e.key === 'Escape') {
+                (e.target as HTMLElement).blur();
+              }
+            }}
+          />
+          {sources.length > 0 && (
+            <div className="presets">
+              {PRESETS.map(p => (
+                <button key={p.label} className="preset-btn" onClick={() => handlePresetClick(p.prompt)}>{p.label}</button>
+              ))}
+            </div>
+          )}
+          <div className="generate-row">
+            <button className="btn-generate" onClick={generate} disabled={status === 'generating'}>
+              {status === 'generating' ? 'Generating...' : 'Generate'}
+            </button>
+            <span className="gen-hint"><kbd className="kbd kbd-sm">&#8984;Enter</kbd> to generate</span>
           </div>
-          <button className="btn-generate" onClick={generate} disabled={status === 'generating' || sources.length === 0 || !prompt.trim()}>
-            {status === 'generating' ? 'Generating...' : 'Generate Synthesis'}
-          </button>
         </div>
       </section>
 
