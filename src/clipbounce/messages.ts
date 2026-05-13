@@ -1,4 +1,4 @@
-import type { SourceRecord, BundleSynthesisResult, ExtractedContent } from './types';
+import type { SourceRecord, BundleSynthesisResult, ExtractedContent, TabBufferState, TabPane } from './types';
 
 export type ExtensionMessage =
   | { type: 'CAPTURE_CURRENT_TAB' }
@@ -18,3 +18,5 @@ export type ExtensionMessage =
 export type ContentScriptMessage =
   | { type: 'EXTRACT' }
   | { type: 'PING' };
+
+export const OPEN_COMMAND = 'open-clipbounce';

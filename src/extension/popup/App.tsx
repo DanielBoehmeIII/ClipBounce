@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import type { SourceRecord, BundleSynthesisResult, ProviderMode } from '../../clipbounce/types';
 import type { ExtensionMessage } from '../../clipbounce/messages';
 import { loadSettings, saveSettings } from '../../clipbounce/storage/settingsStore';
+import type { GenerationStatus } from '../../clipbounce/storage/sessionStore';
 import './App.css';
 
 type AppStatus = 'idle' | 'capturing' | 'generating' | 'complete' | 'error';
@@ -49,6 +50,10 @@ function formatExtractionTiming(source: SourceRecord): string | null {
   return null;
 }
 
+function isSidePanelAvailable(): boolean {
+  return typeof chrome !== 'undefined' && typeof chrome.sidePanel !== 'undefined';
+}
+
 export default function App() {
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [status, setStatus] = useState<AppStatus>('idle');
@@ -66,13 +71,38 @@ export default function App() {
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle');
   const [connectionMsg, setConnectionMsg] = useState('');
   const [expandedText, setExpandedText] = useState<Set<string>>(new Set());
+  const [fastMode, setFastMode] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   useEffect(() => {
     loadSettings().then((cfg) => {
       setProviderMode(cfg.mode);
       setBackendUrl(cfg.backendUrl);
+      setFastMode(cfg.fastMode ?? false);
     });
   }, []);
+
+  useEffect(() => {
+    if (status === 'generating') {
+      setElapsedSeconds(0);
+      const interval = setInterval(() => setElapsedSeconds(prev => prev + 1), 1000);
+      return () => clearInterval(interval);
+    }
+  }, [status]);
+
+  useEffect(() => {
+    if (status !== 'generating') return;
+    const poll = setInterval(async () => {
+      try {
+        const session = await chrome.storage.session.get('clipbounce_session');
+        const data = session.clipbounce_session as { generationStatus?: GenerationStatus } | undefined;
+        if (data?.generationStatus?.message) {
+          setProgressMessage(data.generationStatus.message);
+        }
+      } catch {}
+    }, 500);
+    return () => clearInterval(poll);
+  }, [status]);
 
   const currentProviderLabel = providerMode === 'mock' ? 'Mock' : 'Local Backend';
 
@@ -80,19 +110,25 @@ export default function App() {
     return chrome.runtime.sendMessage(msg);
   }, []);
 
-  const persistSettings = useCallback(async (mode: ProviderMode, url: string) => {
-    await saveSettings({ mode, backendUrl: url });
+  const persistSettings = useCallback(async (mode: ProviderMode, url: string, fast: boolean) => {
+    await saveSettings({ mode, backendUrl: url, fastMode: fast });
   }, []);
 
   const handleModeChange = useCallback((mode: ProviderMode) => {
     setProviderMode(mode);
-    persistSettings(mode, backendUrl);
-  }, [backendUrl, persistSettings]);
+    persistSettings(mode, backendUrl, fastMode);
+  }, [backendUrl, fastMode, persistSettings]);
 
   const handleUrlChange = useCallback((url: string) => {
     setBackendUrl(url);
-    persistSettings(providerMode, url);
-  }, [providerMode, persistSettings]);
+    persistSettings(providerMode, url, fastMode);
+  }, [providerMode, fastMode, persistSettings]);
+
+  const handleFastModeChange = useCallback(() => {
+    const next = !fastMode;
+    setFastMode(next);
+    persistSettings(providerMode, backendUrl, next);
+  }, [providerMode, backendUrl, persistSettings, fastMode]);
 
   const testConnection = useCallback(async () => {
     setConnectionStatus('testing');
@@ -351,6 +387,13 @@ export default function App() {
         </p>
       </header>
 
+      {isSidePanelAvailable() && (
+        <div className="sidepanel-banner">
+          <span className="sidepanel-banner-text">Open ClipBounce in side panel for full workflow tools (tab selection, panes, macros, AI groups).</span>
+          <kbd className="kbd-hint">Ctrl+Shift+L</kbd>
+        </div>
+      )}
+
       {showSettings && (
         <section className="settings-panel">
           <h3 className="settings-title">Provider Settings</h3>
@@ -377,6 +420,23 @@ export default function App() {
                   placeholder="http://localhost:8787"
                 />
               </div>
+              <div className="settings-row settings-row-fast">
+                <label className="settings-label">Fast Mode</label>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={fastMode}
+                    onChange={handleFastModeChange}
+                  />
+                  <span className="toggle-slider" />
+                </label>
+                <span className="toggle-label">{fastMode ? 'On' : 'Off'}</span>
+              </div>
+              {fastMode && (
+                <p className="settings-hint settings-hint-fast">
+                  Fast Mode: using reduced local context &mdash; fewer chunks, shorter output, one-pass synthesis.
+                </p>
+              )}
               <div className="settings-row">
                 <button
                   className="btn btn-secondary btn-sm"
@@ -424,6 +484,19 @@ export default function App() {
         <div className="progress-message">
           <span className="spinner-small" />
           <span>{progressMessage}</span>
+          {status === 'generating' && (
+            <span className="progress-timer">{elapsedSeconds}s</span>
+          )}
+        </div>
+      )}
+      {status === 'generating' && providerMode === 'local' && !fastMode && (
+        <div className="local-tip">
+          Local models may take 30&ndash;90 seconds depending on model size. Enable <strong>Fast Mode</strong> in settings for quicker results.
+        </div>
+      )}
+      {status === 'generating' && providerMode === 'local' && fastMode && (
+        <div className="local-tip local-tip-fast">
+          Fast Mode: using reduced local context &mdash; one-pass synthesis.
         </div>
       )}
 
@@ -446,6 +519,11 @@ export default function App() {
 
       {sources.length > 0 && (
         <section className="sources-section">
+          {providerMode === 'local' && sources.filter(s => s.status === 'ready').length > 3 && (
+            <div className="source-warning">
+              Local mode with more than 3 sources may be slow. Consider removing some sources or enabling Fast Mode.
+            </div>
+          )}
           <h2 className="section-title">
             Sources ({sources.length})
             <span className="source-summary-text">{getBatchSummary(sources)}</span>

@@ -13,5 +13,6 @@ export interface AIProvider {
     sourceSummaries: SourceMiniSummary[];
     formattedSources?: string;
     chunkBudget?: ChunkBudget;
+    fastMode?: boolean;
   }): Promise<BundleSynthesisResult>;
 }

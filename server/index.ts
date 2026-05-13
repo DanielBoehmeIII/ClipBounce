@@ -111,9 +111,10 @@ function structuredError(code: string, message: string, details?: string) {
 async function routeCompletion(
   system: string,
   messages: { role: string; content: string }[],
+  maxTokens?: number,
 ): Promise<string> {
   if (process.env.AI_PROVIDER === 'local') {
-    return localComplete(system, messages);
+    return localComplete(system, messages, maxTokens);
   }
   if (process.env.ANTHROPIC_API_KEY) {
     return anthropicComplete(system, messages);
@@ -128,14 +129,14 @@ async function routeCompletion(
 
 app.post('/api/complete', async (req, res) => {
   try {
-    const { system, messages } = req.body;
+    const { system, messages, maxTokens } = req.body;
 
     if (!system || !messages || !Array.isArray(messages)) {
       res.status(400).json(structuredError('BAD_REQUEST', 'Missing required fields: system, messages'));
       return;
     }
 
-    const result = await routeCompletion(system, messages);
+    const result = await routeCompletion(system, messages, maxTokens);
     res.json({ content: result });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';

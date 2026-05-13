@@ -5,6 +5,7 @@ const SETTINGS_KEY = 'clipbounce_settings';
 const DEFAULT_SETTINGS: ProviderConfig = {
   mode: 'mock',
   backendUrl: 'http://localhost:8787',
+  fastMode: false,
 };
 
 export async function loadSettings(): Promise<ProviderConfig> {

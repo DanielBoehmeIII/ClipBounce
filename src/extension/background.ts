@@ -1,9 +1,10 @@
 import type { ExtensionMessage, ContentScriptMessage } from '../clipbounce/messages';
+import { OPEN_COMMAND } from '../clipbounce/messages';
 import type { SourceRecord, ExtractedContent, BundleSynthesisResult, ProviderConfig } from '../clipbounce/types';
 import { normalizeUrl, isUnsupportedBrowserUrl, parseUrlsFromText } from '../utils/url';
 import { createSourceRecord, queryCurrentTab, queryAllTabs, querySelectedTabs } from '../clipbounce/capture/tabCapture';
 import { normalizeText, isTooSmall } from '../clipbounce/extraction/normalizeText';
-import { updateSources, saveResult, clearSession } from '../clipbounce/storage/sessionStore';
+import { updateSources, saveResult, clearSession, setGenerationStatus } from '../clipbounce/storage/sessionStore';
 import { loadSettings } from '../clipbounce/storage/settingsStore';
 import { synthesizeBundle } from '../clipbounce/synthesis/bundleSynthesizer';
 import { getRemoteProvider } from '../clipbounce/synthesis/providers';
@@ -324,6 +325,31 @@ async function handleGenerateSynthesis(
   return synthesizeBundle(sources, prompt, providerConfig);
 }
 
+async function handleOpenClipBounce(): Promise<void> {
+  try {
+    if (typeof chrome.sidePanel !== 'undefined' && chrome.sidePanel.open) {
+      const windows = await chrome.windows.getCurrent();
+      const windowId = windows.id;
+      if (windowId) {
+        await chrome.sidePanel.open({ windowId });
+      } else {
+        await chrome.sidePanel.open({} as any);
+      }
+      return;
+    }
+  } catch {
+    // sidePanel.open may fail in some contexts; fall through
+  }
+
+  try {
+    if (typeof chrome.action !== 'undefined' && chrome.action.openPopup) {
+      await chrome.action.openPopup();
+    }
+  } catch {
+    // no reliable fallback
+  }
+}
+
 chrome.runtime.onMessage.addListener((
   message: ExtensionMessage,
   _sender,
@@ -356,11 +382,20 @@ chrome.runtime.onMessage.addListener((
           const config = await loadSettings();
           providerConfig = config;
           getRemoteProvider().setBackendUrl(config.backendUrl);
+          const readyCount = message.sources.filter(s => s.status === 'ready').length;
+          await setGenerationStatus({
+            stage: 'preparing',
+            message: `Preparing ${readyCount} source${readyCount !== 1 ? 's' : ''}...`,
+            sourceCount: readyCount,
+            timestamp: Date.now(),
+          });
           try {
             const result = await handleGenerateSynthesis(message.sources, message.prompt);
             await saveResult(result);
+            await setGenerationStatus(null);
             sendResponse({ type: 'SYNTHESIS_COMPLETE', result });
           } catch (err) {
+            await setGenerationStatus(null);
             const msg = err instanceof Error ? err.message : 'Unknown error';
             sendResponse({ type: 'SYNTHESIS_ERROR', error: formatSynthesisError(msg) });
           }
@@ -382,6 +417,12 @@ chrome.runtime.onMessage.addListener((
   })();
 
   return true;
+});
+
+chrome.commands.onCommand.addListener((command) => {
+  if (command === OPEN_COMMAND) {
+    handleOpenClipBounce();
+  }
 });
 
 loadSettings().then((config) => {

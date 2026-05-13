@@ -3,8 +3,19 @@ import { compilePromptSpec, buildChunkFormattedSources } from './promptCompiler'
 import { summarizeAllSources } from './sourceSummarizer';
 import { getProviderForConfig } from './providers';
 import { chunkText, selectChunksForBudget } from './textChunker';
+import { simpleHash } from '../../utils/hash';
 
 const CHUNK_BUDGET = 25_000;
+const LOCAL_CHUNK_BUDGET = 4_000;
+const LOCAL_FAST_CHUNK_BUDGET = 2_500;
+
+const chunkCache = new Map<string, ChunkNode[]>();
+
+function getChunkBudget(config?: ProviderConfig): { budget: number; label: string } {
+  if (!config || config.mode !== 'local') return { budget: CHUNK_BUDGET, label: 'standard' };
+  if (config.fastMode) return { budget: LOCAL_FAST_CHUNK_BUDGET, label: 'fast' };
+  return { budget: LOCAL_CHUNK_BUDGET, label: 'local' };
+}
 
 export async function synthesizeBundle(
   sources: SourceRecord[],
@@ -13,18 +24,33 @@ export async function synthesizeBundle(
 ): Promise<BundleSynthesisResult> {
   const spec = compilePromptSpec(userPrompt);
   const provider = config ? getProviderForConfig(config) : getProviderForConfig({ mode: 'mock', backendUrl: 'http://localhost:8787' });
-  const sourceSummaries = await summarizeAllSources(sources, spec, provider.name);
+
+  const isLocal = config?.mode === 'local';
+  const fastMode = config?.fastMode ?? false;
+  const singleCall = isLocal || fastMode;
+
+  const sourceSummaries = singleCall
+    ? []
+    : await summarizeAllSources(sources, spec, provider.name);
 
   const readySources = sources.filter(s => s.status === 'ready');
+  const { budget } = getChunkBudget(config);
   const allChunks: ChunkNode[] = [];
   readySources.forEach((s, i) => {
     if (s.cleanText) {
-      const chunks = chunkText(s.cleanText, s, i + 1);
-      allChunks.push(...chunks);
+      const cacheKey = `${s.id}:${simpleHash(s.cleanText.slice(0, 500))}`;
+      const cached = chunkCache.get(cacheKey);
+      if (cached) {
+        allChunks.push(...cached);
+      } else {
+        const chunks = chunkText(s.cleanText, s, i + 1);
+        chunkCache.set(cacheKey, chunks);
+        allChunks.push(...chunks);
+      }
     }
   });
 
-  const selection = selectChunksForBudget(allChunks, userPrompt, CHUNK_BUDGET);
+  const selection = selectChunksForBudget(allChunks, userPrompt, budget);
   const formattedSources = selection.selected.length > 0
     ? buildChunkFormattedSources(selection.selected, sources)
     : undefined;
@@ -44,6 +70,7 @@ export async function synthesizeBundle(
     sourceSummaries,
     formattedSources,
     chunkBudget,
+    fastMode: singleCall,
   });
 
   result.citations = selection.selected.map(chunk => ({

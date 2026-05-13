@@ -4,13 +4,16 @@ import { resolve } from 'path';
 
 export default defineConfig({
   plugins: [react()],
-  root: 'src/extension/popup',
+  root: 'src/extension',
   base: './',
   build: {
-    outDir: resolve(__dirname, 'dist/popup'),
-    emptyOutDir: true,
+    outDir: resolve(__dirname, 'dist'),
+    emptyOutDir: false,
     rollupOptions: {
-      input: resolve(__dirname, 'src/extension/popup/index.html'),
+      input: {
+        popup: resolve(__dirname, 'src/extension/popup/index.html'),
+        sidepanel: resolve(__dirname, 'src/extension/sidepanel/index.html'),
+      },
     },
   },
 });

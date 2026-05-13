@@ -1,13 +1,28 @@
 import type { SourceMiniSummary, SourceRecord, PromptSpec } from '../types';
+import { simpleHash } from '../../utils/hash';
 import { getProvider } from './providers';
+
+const summaryCache = new Map<string, SourceMiniSummary>();
+
+function makeCacheKey(source: SourceRecord, prompt: PromptSpec, providerName?: string): string {
+  const contentHash = simpleHash((source.cleanText || '').slice(0, 500));
+  const promptHash = simpleHash(prompt.userPrompt + prompt.mode + (providerName || ''));
+  return `${source.id}:${contentHash}:${promptHash}`;
+}
 
 export async function summarizeSource(
   source: SourceRecord,
   prompt: PromptSpec,
   providerName?: string,
 ): Promise<SourceMiniSummary> {
+  const cacheKey = makeCacheKey(source, prompt, providerName);
+  const cached = summaryCache.get(cacheKey);
+  if (cached) return cached;
+
   const provider = getProvider(providerName);
-  return provider.summarizeSource({ source, prompt });
+  const result = await provider.summarizeSource({ source, prompt });
+  summaryCache.set(cacheKey, result);
+  return result;
 }
 
 export async function summarizeAllSources(

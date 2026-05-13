@@ -77,12 +77,24 @@ Only do this after you have verified capture works in Mock mode.
 
 You have three options:
 
-#### Option A: LM Studio (free, local, no paid API key)
+#### Option A: Ollama or LM Studio (free, local, no paid API key)
 
-1. Download and install [LM Studio](https://lmstudio.ai/)
-2. Open LM Studio, load a model (e.g., Mistral, Llama 3, Phi-3)
-3. Go to the **Server** tab and click **Start Server** (default: `http://localhost:1234`)
-4. Copy the exact model name shown in the Server tab
+ClipBounce can use any OpenAI-compatible local server.
+
+> **Model recommendations for fast local inference:**
+>
+> - **Small models (fastest):** `llama3.2:3b`, `qwen2.5:7b`, `phi4:14b`, `mistral:7b`
+> - **Medium models (balanced):** `llama3.1:8b`, `qwen2.5:14b`, `gemma2:9b`
+> - **Giant models (slow — avoid for MVP):** `qwen3-vl:235b-cloud`, `llama3:70b`, `mixtral:8x22b`
+>
+> Start with 1–2 tabs and a small model. Large vision models like `qwen3-vl:235b-cloud` will be very slow since ClipBounce sends text content only.
+
+**Ollama:**
+
+```bash
+ollama pull llama3:8
+ollama run llama3:8
+```
 
 ```bash
 cd server
@@ -91,11 +103,12 @@ cp .env.example .env
 
 Edit `server/.env` — uncomment and fill in:
 
-```env
+```
 AI_PROVIDER=local
-LOCAL_LLM_BASE_URL=http://localhost:1234/v1
-LOCAL_LLM_MODEL=<exact-model-name>       # e.g. mistral-7b-instruct-v0.2
-LOCAL_LLM_API_KEY=lm-studio
+LOCAL_LLM_BASE_URL=http://localhost:11434/v1
+LOCAL_LLM_MODEL=llama3:8
+LOCAL_LLM_API_KEY=ollama
+PORT=8787
 ```
 
 Then:
@@ -105,9 +118,9 @@ npm install
 npm run dev
 ```
 
-5. Click the gear icon (⚙) in the extension popup
-6. Change Provider Mode to **Local Backend**
-7. Click **Test Connection** to verify
+1. Click the gear icon (⚙) in the extension popup
+2. Change Provider Mode to **Local Backend**
+3. Click **Test Connection** to verify
 
 #### Option B: Paid Anthropic API key
 
@@ -171,6 +184,7 @@ interface AIProvider {
 ```
 
 Three implementations are provided:
+
 - **MockProvider** — template-based, no API calls
 - **RemoteProvider** — sends HTTP requests to the local backend
 - **Local LLM** — free, local model via LM Studio/Ollama
@@ -193,6 +207,7 @@ Call the AI provider with a prompt.
 ```
 
 Response:
+
 ```json
 {
   "content": "Here is the synthesis..."
@@ -215,6 +230,7 @@ Check server status and configured provider readiness.
 ```
 
 For local LLM mode (not yet tested):
+
 ```json
 {
   "status": "ok",
@@ -279,9 +295,13 @@ Errors return structured JSON with status codes:
 | `LOCAL_LLM_BASE_URL` | For local mode | `http://localhost:1234/v1` | Local LLM endpoint |
 | `LOCAL_LLM_MODEL` | **Required for local mode** | — | Exact model name loaded in LM Studio (e.g. `mistral-7b-instruct-v0.2`) |
 | `LOCAL_LLM_API_KEY` | No | `lm-studio` | API key for local endpoint |
+| `LOCAL_LLM_MAX_INPUT_CHARS` | No | `4000` | Max source chars sent to local model (reduce for speed) |
+| `LOCAL_LLM_MAX_CHUNKS` | No | `3` | Max chunks selected for local model |
+| `LOCAL_LLM_MAX_OUTPUT_TOKENS` | No | `700` | Max output tokens for local model |
 | `PORT` | No | `8787` | Server port |
 
 Provider selection priority:
+
 1. `AI_PROVIDER=local` → uses the local LLM (no paid API key needed)
 2. `ANTHROPIC_API_KEY` is set → uses Anthropic Claude
 3. `OPENAI_API_KEY` is set → uses OpenAI GPT
@@ -289,6 +309,16 @@ Provider selection priority:
 
 **Note:** The extension itself defaults to **Mock mode** (no server needed).
 The server only handles real AI synthesis — the extension works without it.
+
+## Local Optimization
+
+ClipBounce includes several features to speed up local/Ollama inference:
+
+- **Provider-aware budgets:** Local mode sends ~4000 chars of source content (vs 25,000 for paid providers). Adjust via `LOCAL_LLM_MAX_INPUT_CHARS` in `server/.env`.
+- **Fast Mode:** A toggle in the extension settings panel. Reduces context further (~2500 chars), skips per-source summarization, and uses a single model call for final synthesis. Enable when you need quick results.
+- **One-call synthesis:** In local/Fast Mode, ClipBounce sends all source content in one prompt instead of making separate summarization calls per source, halving the number of model invocations.
+- **Caching:** Extracted text and per-source summaries are cached in memory, so re-running with the same sources skips redundant work.
+- **Progress UI:** A timer and stage messages show real-time progress during generation.
 
 ## Prompt Reference
 
@@ -303,6 +333,7 @@ The prompt compiler in `promptCompiler.ts` auto-detects intent mode based on key
 | `research_brief` | research, brief, analyze, deep dive |
 
 The RemoteProvider sends a detailed prompt that:
+
 - Includes full source content with `[N]` source numbers
 - Instructs the model to answer **only from provided sources**
 - Separates **repeated ideas** from **unique ideas**

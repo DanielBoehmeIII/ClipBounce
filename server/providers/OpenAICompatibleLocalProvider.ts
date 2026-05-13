@@ -46,6 +46,7 @@ export async function checkHealth(): Promise<{
 export async function complete(
   system: string,
   messages: { role: string; content: string }[],
+  maxTokens?: number,
 ): Promise<string> {
   const { baseURL, model, apiKey } = getConfig();
 
@@ -57,10 +58,12 @@ export async function complete(
 
   const openai = new OpenAI({ apiKey, baseURL });
 
+  const effectiveMaxTokens = maxTokens ?? parseInt(process.env.LOCAL_LLM_MAX_OUTPUT_TOKENS || '4096', 10);
+
   try {
     const response = await openai.chat.completions.create({
       model,
-      max_tokens: 4096,
+      max_tokens: effectiveMaxTokens,
       messages: [
         { role: 'system', content: system },
         ...messages.map((m) => ({

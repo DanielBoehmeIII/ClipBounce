@@ -59,12 +59,23 @@ export class MockProvider implements AIProvider {
     sourceSummaries: SourceMiniSummary[];
     formattedSources?: string;
     chunkBudget?: ChunkBudget;
+    fastMode?: boolean;
   }): Promise<BundleSynthesisResult> {
     const { prompt, sources, sourceSummaries, chunkBudget } = input;
     await delay(500 + Math.random() * 1000);
 
     const readySources = sources.filter((s) => s.status === 'ready');
     const failedSources = sources.filter((s) => s.status === 'failed');
+
+    const fallbackSummaries = readySources.map((s) => ({
+      sourceId: s.id,
+      title: s.title,
+      url: s.url,
+      summary: `Referenced in synthesis as source ${readySources.indexOf(s) + 1}.`,
+      keyPoints: [],
+    }));
+
+    const summaries = sourceSummaries.length > 0 ? sourceSummaries : fallbackSummaries;
 
     const synthesis = generateMockSynthesis(prompt, readySources, failedSources, chunkBudget);
     const repeated = [
@@ -80,7 +91,7 @@ export class MockProvider implements AIProvider {
       sourceCount: sources.length,
       successfulSourceCount: readySources.length,
       failedSourceCount: failedSources.length,
-      sourceSummaries,
+      sourceSummaries: summaries,
       synthesis,
       repeatedIdeas: repeated,
       uniqueIdeas: unique,

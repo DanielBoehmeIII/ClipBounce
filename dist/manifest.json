@@ -1,13 +1,15 @@
 {
   "manifest_version": 3,
   "name": "ClipBounce",
-  "version": "0.1.0",
-  "description": "Prompt multiple websites at once. Select sources, ask anything, get a multi-source synthesis.",
+  "version": "0.2.0",
+  "description": "Prompt, group, and control many websites at once. Multi-source synthesis and tab workflow manager.",
   "permissions": [
     "activeTab",
     "tabs",
     "scripting",
-    "storage"
+    "storage",
+    "tabGroups",
+    "sidePanel"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -16,9 +18,21 @@
     "default_popup": "popup/index.html",
     "default_title": "ClipBounce"
   },
+  "side_panel": {
+    "default_path": "sidepanel/index.html"
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"
+  },
+  "commands": {
+    "open-clipbounce": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+L",
+        "mac": "Command+Shift+L"
+      },
+      "description": "Open ClipBounce side panel"
+    }
   },
   "icons": {
     "16": "icons/icon-16.png",

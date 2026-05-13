@@ -1,3 +1,6 @@
+// src/clipbounce/messages.ts
+var OPEN_COMMAND = "open-clipbounce";
+
 // src/utils/url.ts
 var UNSUPPORTED_PREFIXES = [
   "chrome://",
@@ -56,6 +59,15 @@ function getDomain(url) {
 }
 
 // src/utils/hash.ts
+function simpleHash(input) {
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    const char = input.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash = hash & hash;
+  }
+  return Math.abs(hash).toString(36);
+}
 function generateId() {
   return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
 }
@@ -134,12 +146,18 @@ async function saveResult(result) {
   session.lastResult = result;
   await saveSession(session);
 }
+async function setGenerationStatus(status) {
+  const session = await loadSession();
+  session.generationStatus = status;
+  await saveSession(session);
+}
 
 // src/clipbounce/storage/settingsStore.ts
 var SETTINGS_KEY = "clipbounce_settings";
 var DEFAULT_SETTINGS = {
   mode: "mock",
-  backendUrl: "http://localhost:8787"
+  backendUrl: "http://localhost:8787",
+  fastMode: false
 };
 async function loadSettings() {
   try {
@@ -255,6 +273,14 @@ var MockProvider = class {
     await delay(500 + Math.random() * 1e3);
     const readySources = sources.filter((s) => s.status === "ready");
     const failedSources = sources.filter((s) => s.status === "failed");
+    const fallbackSummaries = readySources.map((s) => ({
+      sourceId: s.id,
+      title: s.title,
+      url: s.url,
+      summary: `Referenced in synthesis as source ${readySources.indexOf(s) + 1}.`,
+      keyPoints: []
+    }));
+    const summaries = sourceSummaries.length > 0 ? sourceSummaries : fallbackSummaries;
     const synthesis = generateMockSynthesis(prompt, readySources, failedSources, chunkBudget);
     const repeated = [
       "All sources emphasize the importance of understanding foundational concepts before diving into specifics.",
@@ -268,7 +294,7 @@ var MockProvider = class {
       sourceCount: sources.length,
       successfulSourceCount: readySources.length,
       failedSourceCount: failedSources.length,
-      sourceSummaries,
+      sourceSummaries: summaries,
       synthesis,
       repeatedIdeas: repeated,
       uniqueIdeas: unique,
@@ -372,7 +398,10 @@ ${(source.cleanText || "").slice(0, 8e3)}`;
     }
   }
   async synthesizeBundle(input) {
-    const { prompt, sources, sourceSummaries, formattedSources, chunkBudget } = input;
+    const { prompt, sources, sourceSummaries, formattedSources, chunkBudget, fastMode } = input;
+    if (fastMode) {
+      return this.synthesizeBundleFast(prompt, sources, formattedSources, chunkBudget);
+    }
     const readySources = sources.filter((s) => s.status === "ready");
     const failedSources = sources.filter((s) => s.status === "failed");
     const sourceBlocks = formattedSources || sources.map((s, i) => {
@@ -446,6 +475,99 @@ Return your response in this format:
       chunkBudget
     };
   }
+  async synthesizeBundleFast(spec, sources, formattedSources, chunkBudget) {
+    const readySources = sources.filter((s) => s.status === "ready");
+    const failedSources = sources.filter((s) => s.status === "failed");
+    const sourceBlocks = formattedSources || sources.map((s, i) => {
+      const idx = i + 1;
+      if (s.status === "ready") {
+        return `[${idx}] ${s.title || "Untitled"}
+URL: ${s.url}
+Content:
+${(s.cleanText || "").slice(0, 2e3)}`;
+      }
+      return `[${idx}] ${s.title || "Untitled"}
+URL: ${s.url}
+Status: ${s.status}${s.error ? " - " + s.error : ""}
+[Content not accessible]`;
+    }).join("\n\n---\n\n");
+    const budgetNote = chunkBudget?.truncated ? `
+Note: Some source content was truncated to fit processing limits (${chunkBudget.truncatedChars.toLocaleString()} chars omitted). ${chunkBudget.selectedChunks} of ${chunkBudget.totalChunks} total chunks were selected.` : "";
+    const system = "You are ClipBounce, a multi-source web synthesis engine. Answer ONLY from the provided sources below. Do not use any external knowledge or make up information.";
+    const userContent = `User request: ${spec.userPrompt}
+
+Sources:
+${sourceBlocks}${budgetNote}
+
+Instructions:
+1. Synthesize an answer using ONLY the provided sources.
+2. Reference sources by number like [1], [2].
+3. After the synthesis, include brief per-source notes.
+
+Return in this format:
+
+## Synthesis
+<answer with [N] citations>
+
+## Source Notes
+### Source 1
+Summary: <1-2 sentences>
+Key points:
+- point1
+- point2
+
+### Source 2
+...`;
+    const response = await this.callAPI(system, userContent, 700);
+    let synthesisText = response;
+    const parsedNotes = [];
+    const synthMatch = response.match(/## Synthesis\n([\s\S]*?)(?=\n## |$)/);
+    if (synthMatch) {
+      synthesisText = synthMatch[1].trim();
+    }
+    const notesSection = response.match(/## Source Notes\n([\s\S]*?)$/);
+    if (notesSection) {
+      const blockRegex = /### Source (\d+)\nSummary: (.*?)\nKey points:\n((?:- .*\n?)*)/g;
+      let m;
+      while ((m = blockRegex.exec(notesSection[1])) !== null) {
+        parsedNotes.push({
+          srcIdx: parseInt(m[1]),
+          summary: m[2].trim(),
+          keyPoints: m[3].split("\n").map((l) => l.replace(/^- /, "").trim()).filter(Boolean)
+        });
+      }
+    }
+    const sourceSummaries = parsedNotes.length > 0 ? parsedNotes.map((n) => {
+      const src = readySources[n.srcIdx - 1];
+      return {
+        sourceId: src?.id || "",
+        title: src?.title,
+        url: src?.url || "",
+        summary: n.summary || `Referenced in synthesis as source ${n.srcIdx}.`,
+        keyPoints: n.keyPoints
+      };
+    }) : readySources.map((s, i) => ({
+      sourceId: s.id,
+      title: s.title,
+      url: s.url,
+      summary: "Referenced in synthesis.",
+      keyPoints: []
+    }));
+    return {
+      prompt: spec.userPrompt,
+      sourceCount: sources.length,
+      successfulSourceCount: readySources.length,
+      failedSourceCount: failedSources.length,
+      sourceSummaries,
+      synthesis: synthesisText,
+      failures: failedSources.map((s) => ({
+        url: s.url,
+        reason: s.error || "Unknown error"
+      })),
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      chunkBudget
+    };
+  }
   async testConnection() {
     try {
       const resp = await fetch(`${this._backendUrl}/api/health/check`, {
@@ -463,14 +585,16 @@ Return your response in this format:
       return { ok: false, message: err instanceof Error ? err.message : "Connection failed" };
     }
   }
-  async callAPI(system, userContent) {
+  async callAPI(system, userContent, maxTokens) {
+    const body = {
+      system,
+      messages: [{ role: "user", content: userContent }]
+    };
+    if (maxTokens !== void 0) body.maxTokens = maxTokens;
     const resp = await fetch(`${this._backendUrl}/api/complete`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system,
-        messages: [{ role: "user", content: userContent }]
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(9e4)
     });
     if (!resp.ok) {
@@ -539,9 +663,20 @@ function getRemoteProvider() {
 }
 
 // src/clipbounce/synthesis/sourceSummarizer.ts
+var summaryCache = /* @__PURE__ */ new Map();
+function makeCacheKey(source, prompt, providerName) {
+  const contentHash = simpleHash((source.cleanText || "").slice(0, 500));
+  const promptHash = simpleHash(prompt.userPrompt + prompt.mode + (providerName || ""));
+  return `${source.id}:${contentHash}:${promptHash}`;
+}
 async function summarizeSource(source, prompt, providerName) {
+  const cacheKey = makeCacheKey(source, prompt, providerName);
+  const cached = summaryCache.get(cacheKey);
+  if (cached) return cached;
   const provider = getProvider(providerName);
-  return provider.summarizeSource({ source, prompt });
+  const result = await provider.summarizeSource({ source, prompt });
+  summaryCache.set(cacheKey, result);
+  return result;
 }
 async function summarizeAllSources(sources, prompt, providerName) {
   const ready = sources.filter((s) => s.status === "ready");
@@ -699,19 +834,38 @@ function selectChunksForBudget(chunks, userPrompt, budget) {
 
 // src/clipbounce/synthesis/bundleSynthesizer.ts
 var CHUNK_BUDGET = 25e3;
+var LOCAL_CHUNK_BUDGET = 4e3;
+var LOCAL_FAST_CHUNK_BUDGET = 2500;
+var chunkCache = /* @__PURE__ */ new Map();
+function getChunkBudget(config) {
+  if (!config || config.mode !== "local") return { budget: CHUNK_BUDGET, label: "standard" };
+  if (config.fastMode) return { budget: LOCAL_FAST_CHUNK_BUDGET, label: "fast" };
+  return { budget: LOCAL_CHUNK_BUDGET, label: "local" };
+}
 async function synthesizeBundle(sources, userPrompt, config) {
   const spec = compilePromptSpec(userPrompt);
   const provider = config ? getProviderForConfig(config) : getProviderForConfig({ mode: "mock", backendUrl: "http://localhost:8787" });
-  const sourceSummaries = await summarizeAllSources(sources, spec, provider.name);
+  const isLocal = config?.mode === "local";
+  const fastMode = config?.fastMode ?? false;
+  const singleCall = isLocal || fastMode;
+  const sourceSummaries = singleCall ? [] : await summarizeAllSources(sources, spec, provider.name);
   const readySources = sources.filter((s) => s.status === "ready");
+  const { budget } = getChunkBudget(config);
   const allChunks = [];
   readySources.forEach((s, i) => {
     if (s.cleanText) {
-      const chunks = chunkText(s.cleanText, s, i + 1);
-      allChunks.push(...chunks);
+      const cacheKey = `${s.id}:${simpleHash(s.cleanText.slice(0, 500))}`;
+      const cached = chunkCache.get(cacheKey);
+      if (cached) {
+        allChunks.push(...cached);
+      } else {
+        const chunks = chunkText(s.cleanText, s, i + 1);
+        chunkCache.set(cacheKey, chunks);
+        allChunks.push(...chunks);
+      }
     }
   });
-  const selection = selectChunksForBudget(allChunks, userPrompt, CHUNK_BUDGET);
+  const selection = selectChunksForBudget(allChunks, userPrompt, budget);
   const formattedSources = selection.selected.length > 0 ? buildChunkFormattedSources(selection.selected, sources) : void 0;
   const chunkBudget = {
     totalChars: selection.totalChars,
@@ -726,7 +880,8 @@ async function synthesizeBundle(sources, userPrompt, config) {
     sources,
     sourceSummaries,
     formattedSources,
-    chunkBudget
+    chunkBudget,
+    fastMode: singleCall
   });
   result.citations = selection.selected.map((chunk) => ({
     sourceNumber: chunk.sourceNumber,
@@ -996,6 +1151,27 @@ function formatSynthesisError(msg) {
 async function handleGenerateSynthesis(sources, prompt) {
   return synthesizeBundle(sources, prompt, providerConfig);
 }
+async function handleOpenClipBounce() {
+  try {
+    if (typeof chrome.sidePanel !== "undefined" && chrome.sidePanel.open) {
+      const windows = await chrome.windows.getCurrent();
+      const windowId = windows.id;
+      if (windowId) {
+        await chrome.sidePanel.open({ windowId });
+      } else {
+        await chrome.sidePanel.open({});
+      }
+      return;
+    }
+  } catch {
+  }
+  try {
+    if (typeof chrome.action !== "undefined" && chrome.action.openPopup) {
+      await chrome.action.openPopup();
+    }
+  } catch {
+  }
+}
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     try {
@@ -1024,11 +1200,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           const config = await loadSettings();
           providerConfig = config;
           getRemoteProvider().setBackendUrl(config.backendUrl);
+          const readyCount = message.sources.filter((s) => s.status === "ready").length;
+          await setGenerationStatus({
+            stage: "preparing",
+            message: `Preparing ${readyCount} source${readyCount !== 1 ? "s" : ""}...`,
+            sourceCount: readyCount,
+            timestamp: Date.now()
+          });
           try {
             const result = await handleGenerateSynthesis(message.sources, message.prompt);
             await saveResult(result);
+            await setGenerationStatus(null);
             sendResponse({ type: "SYNTHESIS_COMPLETE", result });
           } catch (err) {
+            await setGenerationStatus(null);
             const msg = err instanceof Error ? err.message : "Unknown error";
             sendResponse({ type: "SYNTHESIS_ERROR", error: formatSynthesisError(msg) });
           }
@@ -1049,6 +1234,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
   })();
   return true;
+});
+chrome.commands.onCommand.addListener((command) => {
+  if (command === OPEN_COMMAND) {
+    handleOpenClipBounce();
+  }
 });
 loadSettings().then((config) => {
   providerConfig = config;

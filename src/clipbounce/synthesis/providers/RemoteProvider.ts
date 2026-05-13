@@ -63,8 +63,13 @@ ${(source.cleanText || '').slice(0, 8000)}`;
     sourceSummaries: SourceMiniSummary[];
     formattedSources?: string;
     chunkBudget?: ChunkBudget;
+    fastMode?: boolean;
   }): Promise<BundleSynthesisResult> {
-    const { prompt, sources, sourceSummaries, formattedSources, chunkBudget } = input;
+    const { prompt, sources, sourceSummaries, formattedSources, chunkBudget, fastMode } = input;
+
+    if (fastMode) {
+      return this.synthesizeBundleFast(prompt, sources, formattedSources, chunkBudget);
+    }
 
     const readySources = sources.filter((s) => s.status === 'ready');
     const failedSources = sources.filter((s) => s.status === 'failed');
@@ -155,6 +160,120 @@ Return your response in this format:
     };
   }
 
+  private async synthesizeBundleFast(
+    spec: PromptSpec,
+    sources: SourceRecord[],
+    formattedSources?: string,
+    chunkBudget?: ChunkBudget,
+  ): Promise<BundleSynthesisResult> {
+    const readySources = sources.filter((s) => s.status === 'ready');
+    const failedSources = sources.filter((s) => s.status === 'failed');
+
+    const sourceBlocks = formattedSources || sources.map((s, i) => {
+      const idx = i + 1;
+      if (s.status === 'ready') {
+        return `[${idx}] ${s.title || 'Untitled'}
+URL: ${s.url}
+Content:
+${(s.cleanText || '').slice(0, 2000)}`;
+      }
+      return `[${idx}] ${s.title || 'Untitled'}
+URL: ${s.url}
+Status: ${s.status}${s.error ? ' - ' + s.error : ''}
+[Content not accessible]`;
+    }).join('\n\n---\n\n');
+
+    const budgetNote = chunkBudget?.truncated
+      ? `\nNote: Some source content was truncated to fit processing limits (${chunkBudget.truncatedChars.toLocaleString()} chars omitted). ${chunkBudget.selectedChunks} of ${chunkBudget.totalChunks} total chunks were selected.`
+      : '';
+
+    const system =
+      'You are ClipBounce, a multi-source web synthesis engine. ' +
+      'Answer ONLY from the provided sources below. ' +
+      'Do not use any external knowledge or make up information.';
+    const userContent = `User request: ${spec.userPrompt}
+
+Sources:
+${sourceBlocks}${budgetNote}
+
+Instructions:
+1. Synthesize an answer using ONLY the provided sources.
+2. Reference sources by number like [1], [2].
+3. After the synthesis, include brief per-source notes.
+
+Return in this format:
+
+## Synthesis
+<answer with [N] citations>
+
+## Source Notes
+### Source 1
+Summary: <1-2 sentences>
+Key points:
+- point1
+- point2
+
+### Source 2
+...`;
+
+    const response = await this.callAPI(system, userContent, 700);
+
+    let synthesisText = response;
+    const parsedNotes: { srcIdx: number; summary: string; keyPoints: string[] }[] = [];
+
+    const synthMatch = response.match(/## Synthesis\n([\s\S]*?)(?=\n## |$)/);
+    if (synthMatch) {
+      synthesisText = synthMatch[1].trim();
+    }
+
+    const notesSection = response.match(/## Source Notes\n([\s\S]*?)$/);
+    if (notesSection) {
+      const blockRegex = /### Source (\d+)\nSummary: (.*?)\nKey points:\n((?:- .*\n?)*)/g;
+      let m;
+      while ((m = blockRegex.exec(notesSection[1])) !== null) {
+        parsedNotes.push({
+          srcIdx: parseInt(m[1]),
+          summary: m[2].trim(),
+          keyPoints: m[3].split('\n').map(l => l.replace(/^- /, '').trim()).filter(Boolean),
+        });
+      }
+    }
+
+    const sourceSummaries: SourceMiniSummary[] = parsedNotes.length > 0
+      ? parsedNotes.map(n => {
+          const src = readySources[n.srcIdx - 1];
+          return {
+            sourceId: src?.id || '',
+            title: src?.title,
+            url: src?.url || '',
+            summary: n.summary || `Referenced in synthesis as source ${n.srcIdx}.`,
+            keyPoints: n.keyPoints,
+          };
+        })
+      : readySources.map((s, i) => ({
+          sourceId: s.id,
+          title: s.title,
+          url: s.url,
+          summary: 'Referenced in synthesis.',
+          keyPoints: [],
+        }));
+
+    return {
+      prompt: spec.userPrompt,
+      sourceCount: sources.length,
+      successfulSourceCount: readySources.length,
+      failedSourceCount: failedSources.length,
+      sourceSummaries,
+      synthesis: synthesisText,
+      failures: failedSources.map((s) => ({
+        url: s.url,
+        reason: s.error || 'Unknown error',
+      })),
+      generatedAt: new Date().toISOString(),
+      chunkBudget,
+    };
+  }
+
   async testConnection(): Promise<{ ok: boolean; message: string }> {
     try {
       const resp = await fetch(`${this._backendUrl}/api/health/check`, {
@@ -173,14 +292,16 @@ Return your response in this format:
     }
   }
 
-  private async callAPI(system: string, userContent: string): Promise<string> {
+  private async callAPI(system: string, userContent: string, maxTokens?: number): Promise<string> {
+    const body: Record<string, unknown> = {
+      system,
+      messages: [{ role: 'user', content: userContent }],
+    };
+    if (maxTokens !== undefined) body.maxTokens = maxTokens;
     const resp = await fetch(`${this._backendUrl}/api/complete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        system,
-        messages: [{ role: 'user', content: userContent }],
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(90000),
     });
 

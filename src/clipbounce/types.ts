@@ -91,6 +91,7 @@ export type ProviderMode = "mock" | "local";
 export type ProviderConfig = {
   mode: ProviderMode;
   backendUrl: string;
+  fastMode?: boolean;
 };
 
 export type ExtractedContent = {
@@ -99,4 +100,64 @@ export type ExtractedContent = {
   text: string;
   headings: string[];
   charCount: number;
+};
+
+export type TabInfo = {
+  id: number;
+  index: number;
+  windowId: number;
+  url: string;
+  title: string;
+  domain: string;
+  highlighted: boolean;
+  active: boolean;
+};
+
+export type TabBufferState = {
+  windowId: number;
+  leftIndex: number;
+  rightIndex: number;
+  activeBoundary: 'left' | 'right';
+  totalTabs: number;
+};
+
+export type PaneColor = 'grey' | 'blue' | 'red' | 'yellow' | 'green' | 'pink' | 'purple' | 'cyan' | 'orange';
+
+export type TabPane = {
+  id: string;
+  title: string;
+  windowId: number;
+  tabIds: number[];
+  tabUrls: string[];
+  tabTitles: string[];
+  chromeGroupId?: number;
+  color?: PaneColor;
+  createdAt: string;
+  updatedAt: string;
+  status: 'active' | 'released' | 'archived';
+};
+
+export type MacroCategory = 'research' | 'focus' | 'cleanup' | 'synthesis' | 'session';
+
+export type MacroDefinition = {
+  id: string;
+  title: string;
+  description: string;
+  icon?: string;
+  category: MacroCategory;
+  requiresSources?: boolean;
+};
+
+export type MacroContext = {
+  buffer: TabBufferState | null;
+  panes: TabPane[];
+  sources: SourceRecord[];
+  windowTabs: TabInfo[];
+};
+
+export type TabGroupSuggestion = {
+  title: string;
+  color: PaneColor;
+  tabIds: number[];
+  tabCount: number;
 };
