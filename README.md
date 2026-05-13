@@ -4,6 +4,12 @@ Prompt multiple websites at once. Select sources, ask anything, get a multi-sour
 
 ## Features
 
+- **Workflow Dashboard** — Selection buffer, keyboard controls, pane/tab-group manager, AI groups, macros, and synthesis in one UI
+- **Chrome Side Panel** — Press Ctrl+Shift+L (or Cmd+Shift+L on Mac) to open ClipBounce in the side panel for a wider, persistent workspace
+- **Tab Selection Buffer** — Visual range bar with keyboard-driven left/right boundary control (Space, Arrow keys)
+- **Pane System** — Create named/colored tab groups from your selection; Focus, Release, Archive, or Restore sessions
+- **AI Groups** — Smart Group your tabs by domain/content into Research, Development, Writing, Shopping, and more
+- **Macros** — One-click workflows: Open Research Set, Build Focus Workspace, Archive Tabs, Restore Session, Summarize Pane, Compare Tabs, Extract Pricing
 - **Capture sources** — current tab, all tabs, selected tabs, or paste URLs
 - **Extract readable text** — strips nav/ads/footers, collapses whitespace
 - **Multi-source synthesis** — AI-powered answers grounded in your sources
@@ -24,7 +30,8 @@ src/
   extension/
     background.ts        — service worker: capture, injection, synthesis orchestration
     contentScript.ts     — injected per-tab: page text extraction via DOMParser
-    popup/               — React UI (Vite-built, 540px)
+    popup/               — React workflow UI (Vite-built, 750px)
+    sidepanel/           — Chrome side panel React app (same dashboard, persistent)
   clipbounce/
     types.ts             — shared type definitions
     messages.ts          — extension message types
@@ -355,9 +362,9 @@ The RemoteProvider sends a detailed prompt that:
 - No persistent history between sessions (beyond current result)
 - RemoteProvider makes separate API calls for each source summary + one final synthesis call (cost scales with number of sources)
 - Large source texts are truncated at ~4000 chars per source for API calls
-- Popup width limited to 540px (Chrome extension constraint)
+- Popup width limited to 750px (Chrome extension constraint)
+- Side panel may require manual pinning on first use — right-click the extension icon and select "Open side panel" if Ctrl+Shift+L does not work
 - No semantic deduplication
-- No keyboard shortcuts
 
 ## Future Iterations
 
@@ -366,5 +373,4 @@ The RemoteProvider sends a detailed prompt that:
 - Evidence graph with quoted passages
 - Saved research capsules
 - Chrome built-in Summarizer API
-- Side panel for better long-form results
 - Streaming synthesis output
