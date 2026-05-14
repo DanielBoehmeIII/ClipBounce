@@ -104,7 +104,7 @@ export default function App() {
   const [windowTabs, setWindowTabs] = useState<TabInfo[]>([]);
   const [buffer, setBuffer] = useState<TabBufferState | null>(null);
   const [panes, setPanes] = useState<TabPane[]>([]);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set(['pane', 'auto-create', 'macros']));
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set(['keyboard', 'pane', 'ai-groups', 'auto-create', 'macros', 'urls']));
   const [paneTitle, setPaneTitle] = useState('');
   const [paneColor, setPaneColor] = useState<PaneColor>('blue');
   const [smartGrouping, setSmartGrouping] = useState(false);
@@ -841,7 +841,6 @@ export default function App() {
             <span className="provider-badge">{currentProviderLabel}</span>
           </div>
           <div className="header-actions">
-            <kbd className="kbd">Ctrl+Shift+L</kbd>
             <button className="sp-open-btn" onClick={openSidePanel} title="Open in Chrome side panel for more space">Side Panel</button>
             <span className="badge" onClick={() => toggleSection('settings')} title="Settings">
               {showSettings ? '\u2715' : '\u2699'}
@@ -1151,15 +1150,18 @@ export default function App() {
 
       {/* URL INPUT */}
       <section className="section">
-        <div className="section-header">
+        <div className="section-header" onClick={() => toggleSection('urls')}>
           <h2 className="section-label">URLS</h2>
+          <span className="section-toggle">{collapsed.has('urls') ? '▶' : '▼'}</span>
         </div>
-        <div className="section-body">
-          <div className="url-row">
-            <textarea className="textarea" placeholder="Paste URLs..." value={urlText} onChange={(e) => setUrlText(e.target.value)} rows={2} />
-            <button className="btn btn-sm" onClick={addPastedUrls} disabled={status === 'capturing' || !urlText.trim()}>Add</button>
+        {!collapsed.has('urls') && (
+          <div className="section-body">
+            <div className="url-row">
+              <textarea className="textarea" placeholder="Paste URLs..." value={urlText} onChange={(e) => setUrlText(e.target.value)} rows={2} />
+              <button className="btn btn-sm" onClick={addPastedUrls} disabled={status === 'capturing' || !urlText.trim()}>Add</button>
+            </div>
           </div>
-        </div>
+        )}
       </section>
 
       {/* EMPTY STATE */}
@@ -1330,7 +1332,7 @@ export default function App() {
 
       {/* FOOTER */}
       <div className="footer">
-        <span className="text-muted">Tip: Press Ctrl+Shift+L anytime to open ClipBounce side panel</span>
+        <span className="text-muted">Ctrl+Shift+L · open side panel</span>
       </div>
     </div>
   );

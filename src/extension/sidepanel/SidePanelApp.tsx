@@ -68,7 +68,7 @@ export default function SidePanelApp() {
   const [windowTabs, setWindowTabs] = useState<TabInfo[]>([]);
   const [buffer, setBuffer] = useState<TabBufferState | null>(null);
   const [panes, setPanes] = useState<TabPane[]>([]);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set(['pane', 'auto-create', 'macros']));
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set(['keyboard', 'pane', 'ai-groups', 'auto-create', 'macros', 'urls']));
   const [paneTitle, setPaneTitle] = useState('');
   const [paneColor, setPaneColor] = useState<PaneColor>('blue');
   const [smartGrouping, setSmartGrouping] = useState(false);
@@ -791,7 +791,6 @@ export default function SidePanelApp() {
             <span className="sp-provider-badge">{currentProviderLabel}</span>
           </div>
           <div className="sp-header-actions">
-            <kbd className="sp-kbd">Ctrl+Shift+L</kbd>
             <span className="sp-badge" onClick={() => toggleSection('settings')} title="Settings">
               {showSettings ? '\u2715' : '\u2699'}
             </span>
@@ -1073,15 +1072,18 @@ export default function SidePanelApp() {
 
       {/* URL INPUT */}
       <section className="sp-section">
-        <div className="sp-section-header">
+        <div className="sp-section-header" onClick={() => toggleSection('urls')}>
           <h2 className="sp-section-label">URLS</h2>
+          <span className="sp-section-toggle">{collapsed.has('urls') ? '▶' : '▼'}</span>
         </div>
-        <div className="sp-section-body">
-          <div className="sp-url-row">
-            <textarea className="sp-textarea" placeholder="Paste URLs..." value={urlText} onChange={(e) => setUrlText(e.target.value)} rows={2} />
-            <button className="sp-btn sp-btn-sm" onClick={addPastedUrls} disabled={status === 'capturing' || !urlText.trim()}>Add</button>
+        {!collapsed.has('urls') && (
+          <div className="sp-section-body">
+            <div className="sp-url-row">
+              <textarea className="sp-textarea" placeholder="Paste URLs..." value={urlText} onChange={(e) => setUrlText(e.target.value)} rows={2} />
+              <button className="sp-btn sp-btn-sm" onClick={addPastedUrls} disabled={status === 'capturing' || !urlText.trim()}>Add</button>
+            </div>
           </div>
-        </div>
+        )}
       </section>
 
       {/* EMPTY STATE */}
@@ -1252,7 +1254,7 @@ export default function SidePanelApp() {
 
       {/* FOOTER */}
       <div className="sp-footer">
-        <span className="sp-text-muted">Tip: Press Ctrl+Shift+L anytime to open ClipBounce</span>
+        <span className="sp-text-muted">Ctrl+Shift+L · open ClipBounce</span>
       </div>
     </div>
   );
