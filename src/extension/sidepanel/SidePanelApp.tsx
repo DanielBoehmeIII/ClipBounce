@@ -3,7 +3,7 @@ import type { SourceRecord, BundleSynthesisResult, ProviderMode, TabInfo, TabBuf
 import type { ExtensionMessage } from '../../clipbounce/messages';
 import { loadSettings, saveSettings } from '../../clipbounce/storage/settingsStore';
 import type { GenerationStatus } from '../../clipbounce/storage/sessionStore';
-import { createBufferFromTabs, toggleBoundary, growLeft, shrinkLeft, growRight, shrinkRight, getBufferedTabCount, getBufferedRangeLabel, applyHighlightToChrome, isInputFocused } from '../../clipbounce/tabs/tabBuffer';
+import { createBufferFromTabs, toggleBoundary, growLeft, shrinkLeft, growRight, shrinkRight, growLeftFast, shrinkLeftFast, growRightFast, shrinkRightFast, getBufferedTabCount, getBufferedRangeLabel, applyHighlightToChrome, isInputFocused } from '../../clipbounce/tabs/tabBuffer';
 import { smartGroupTabs } from '../../clipbounce/tabs/tabClassifier';
 import { applySmartGroupSuggestions, tabGroupsAvailable } from '../../clipbounce/tabs/tabGroups';
 import { loadPanes, createPane, releasePane, archivePane, focusPane, restorePane, deletePane } from '../../clipbounce/panes/paneManager';
@@ -68,7 +68,7 @@ export default function SidePanelApp() {
   const [windowTabs, setWindowTabs] = useState<TabInfo[]>([]);
   const [buffer, setBuffer] = useState<TabBufferState | null>(null);
   const [panes, setPanes] = useState<TabPane[]>([]);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set(['keyboard', 'pane', 'ai-groups', 'auto-create', 'macros', 'urls']));
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set(['pane', 'ai-groups', 'auto-create', 'macros', 'urls']));
   const [paneTitle, setPaneTitle] = useState('');
   const [paneColor, setPaneColor] = useState<PaneColor>('blue');
   const [smartGrouping, setSmartGrouping] = useState(false);
@@ -78,7 +78,6 @@ export default function SidePanelApp() {
   const [savedSessions, setSavedSessions] = useState<TabPane[]>([]);
   const [showSessions, setShowSessions] = useState(false);
   const [currentPane, setCurrentPane] = useState<TabPane | null>(null);
-  const [boundaryPulse, setBoundaryPulse] = useState<'left' | 'right' | null>(null);
 
   useEffect(() => {
     loadSettings().then((cfg) => {
@@ -211,102 +210,96 @@ export default function SidePanelApp() {
   }, [captureBufferedTabs]);
 
   const handleEscape = useCallback(() => {
+    if (document.activeElement?.tagName.toLowerCase() === 'textarea') {
+      (document.activeElement as HTMLElement).blur();
+      return;
+    }
+    if (buffer && getBufferedTabCount(buffer) > 1) {
+      const tabs = windowTabsRef.current;
+      const active = tabs.find(t => t.active);
+      const idx = active ? active.index : 0;
+      setBuffer({ ...buffer, leftIndex: idx, rightIndex: idx });
+      return;
+    }
     if (showSettings) { setShowSettings(false); return; }
     if (confirmArchive) { setConfirmArchive(null); return; }
     if (showSessions) { setShowSessions(false); return; }
-    if (document.activeElement?.tagName.toLowerCase() === 'textarea') {
-      (document.activeElement as HTMLElement).blur();
-    }
-  }, [showSettings, confirmArchive, showSessions]);
+  }, [buffer, showSettings, confirmArchive, showSessions]);
 
-  const handleEnterKeyRef = useRef(handleEnterKey);
-  handleEnterKeyRef.current = handleEnterKey;
-  const handleGenerateShortcutRef = useRef(handleGenerateShortcut);
-  handleGenerateShortcutRef.current = handleGenerateShortcut;
-  const handlePromptEnterRef = useRef(handlePromptEnter);
-  handlePromptEnterRef.current = handlePromptEnter;
   const handleEscapeRef = useRef(handleEscape);
   handleEscapeRef.current = handleEscape;
-  const handleCompare = useCallback(async () => {
-    const comparePrompt = 'Compare the main ideas across these sources.';
-    setPrompt(comparePrompt);
-    let currentSources = sourcesRef.current;
-    if (currentSources.length === 0) {
-      const captured = await captureBufferedTabs();
-      if (!captured) return;
-      currentSources = sourcesRef.current;
-      if (currentSources.length === 0) return;
-    }
-    generateWithPrompt(currentSources, comparePrompt);
-  }, [captureBufferedTabs, generateWithPrompt]);
-  const handleCompareRef = useRef(handleCompare);
-  handleCompareRef.current = handleCompare;
+  const handleGenerateRef = useRef(handleGenerateShortcut);
+  handleGenerateRef.current = handleGenerateShortcut;
+  const focusNextSection = useCallback(() => {
+    const els = document.querySelectorAll('[data-focus-section]');
+    const current = document.activeElement;
+    let idx = Array.from(els).findIndex(el => el === current);
+    if (idx < 0) idx = els.length - 1;
+    const next = els[(idx + 1) % els.length] as HTMLElement;
+    next?.focus();
+  }, []);
+
+  const focusPrevSection = useCallback(() => {
+    const els = document.querySelectorAll('[data-focus-section]');
+    const current = document.activeElement;
+    let idx = Array.from(els).findIndex(el => el === current);
+    if (idx < 0) idx = 0;
+    const prev = els[(idx - 1 + els.length) % els.length] as HTMLElement;
+    prev?.focus();
+  }, []);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const buf = bufferRef.current;
+      const tag = document.activeElement?.tagName.toLowerCase();
+      const isInput = tag === 'input' || tag === 'textarea' || tag === 'select';
 
-      if (isInputFocused()) {
-        const tag = document.activeElement?.tagName.toLowerCase();
-        if (tag === 'textarea' && e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
-          e.preventDefault();
-          handlePromptEnterRef.current();
-        }
+      if (tag === 'textarea' && e.key === 'Enter') {
+        if (e.shiftKey) return;
+        e.preventDefault();
+        handleGenerateRef.current();
         return;
       }
+
+      if (isInput) return;
 
       if (e.key === ' ') {
         e.preventDefault();
         if (!buf) return;
-        const next = toggleBoundary(buf);
-        setBuffer(next);
-        setBoundaryPulse(next.activeBoundary);
-        setTimeout(() => setBoundaryPulse(null), 400);
+        setBuffer(toggleBoundary(buf));
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
         if (!buf) return;
-        const next = buf.activeBoundary === 'left' ? growLeft(buf) : shrinkRight(buf);
+        const next = e.shiftKey
+          ? (buf.activeBoundary === 'left' ? growLeftFast(buf) : shrinkRightFast(buf))
+          : (buf.activeBoundary === 'left' ? growLeft(buf) : shrinkRight(buf));
         setBuffer(next);
         applyHighlightToChrome(next.windowId, next.leftIndex, next.rightIndex, windowTabsRef.current);
-        setBoundaryPulse(next.activeBoundary);
-        setTimeout(() => setBoundaryPulse(null), 400);
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
         if (!buf) return;
-        const next = buf.activeBoundary === 'right' ? growRight(buf) : shrinkLeft(buf);
+        const next = e.shiftKey
+          ? (buf.activeBoundary === 'right' ? growRightFast(buf) : shrinkLeftFast(buf))
+          : (buf.activeBoundary === 'right' ? growRight(buf) : shrinkLeft(buf));
         setBuffer(next);
         applyHighlightToChrome(next.windowId, next.leftIndex, next.rightIndex, windowTabsRef.current);
-        setBoundaryPulse(next.activeBoundary);
-        setTimeout(() => setBoundaryPulse(null), 400);
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
-        handleCreatePaneRef.current();
+        focusPrevSection();
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
-        handleReleaseCurrentPaneRef.current();
-      } else if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+        focusNextSection();
+      } else if (e.key === 'Enter') {
         e.preventDefault();
-        handleEnterKeyRef.current();
-      } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-        e.preventDefault();
-        handleGenerateShortcutRef.current();
+        handleGenerateRef.current();
       } else if (e.key === 'Escape') {
         e.preventDefault();
         handleEscapeRef.current();
-      } else if (e.key === 'g' || e.key === 'G') {
-        e.preventDefault();
-        handleSmartGroupRef.current();
-      } else if (e.key === 's' || e.key === 'S') {
-        e.preventDefault();
-        handleGenerateShortcutRef.current();
-      } else if (e.key === 'c' || e.key === 'C') {
-        e.preventDefault();
-        handleCompareRef.current();
       }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, []);
+  }, [focusNextSection, focusPrevSection]);
 
   const currentProviderLabel = providerMode === 'mock' ? 'Mock' : 'Local Backend';
 
@@ -663,6 +656,11 @@ export default function SidePanelApp() {
     );
   }, [startCapture]);
 
+  const addCurrentTabRef = useRef(addCurrentTab);
+  addCurrentTabRef.current = addCurrentTab;
+  const addSelectedTabsRef = useRef(addSelectedTabs);
+  addSelectedTabsRef.current = addSelectedTabs;
+
   const addPastedUrls = useCallback(async () => {
     if (!urlText.trim()) return;
     setStatus('capturing');
@@ -776,6 +774,29 @@ export default function SidePanelApp() {
     URL.revokeObjectURL(url);
   }, [result, currentProviderLabel]);
 
+  useEffect(() => {
+    chrome.storage.session.get('clipbounce_pending').then(({ clipbounce_pending }) => {
+      if (!clipbounce_pending) return;
+      chrome.storage.session.remove('clipbounce_pending');
+      const { action, prompt: pendingPrompt } = clipbounce_pending as { action: string; prompt?: string };
+      if (action === 'summarize-current') {
+        const p = pendingPrompt || 'Summarize this page.';
+        setPrompt(p);
+        addCurrentTabRef.current();
+      } else if (action === 'summarize-selected') {
+        setPrompt(pendingPrompt || 'Summarize these tabs.');
+        addSelectedTabsRef.current();
+      } else if (action === 'smart-group') {
+        handleSmartGroupRef.current();
+      } else if (action === 'custom-prompt' && pendingPrompt) {
+        setPrompt(pendingPrompt);
+        addCurrentTabRef.current();
+      } else if (action === 'open-settings') {
+        setShowSettings(true);
+      }
+    });
+  }, []);
+
   const readyCount = sources.filter((s) => s.status === 'ready').length;
   const bufferedCount = buffer ? getBufferedTabCount(buffer) : 0;
   const rangeLabel = buffer ? getBufferedRangeLabel(buffer) : '';
@@ -791,7 +812,7 @@ export default function SidePanelApp() {
             <span className="sp-provider-badge">{currentProviderLabel}</span>
           </div>
           <div className="sp-header-actions">
-            <span className="sp-badge" onClick={() => toggleSection('settings')} title="Settings">
+            <span className="sp-badge" onClick={() => setShowSettings(s => !s)} title="Settings">
               {showSettings ? '\u2715' : '\u2699'}
             </span>
           </div>
@@ -892,10 +913,10 @@ export default function SidePanelApp() {
                 <span className="sp-sel-metric-value">{buffer?.totalTabs || 0}</span>
                 <span className="sp-sel-metric-label">Total Tabs</span>
               </div>
-              <div className="sp-sel-boundary">
-                <span className={`sp-sel-boundary-pill ${buffer?.activeBoundary === 'left' ? 'sp-sel-boundary-active' : ''} ${boundaryPulse === 'left' ? 'sp-sel-boundary-pulse' : ''}`}>← LEFT</span>
-                <span className="sp-sel-boundary-divider"> · </span>
-                <span className={`sp-sel-boundary-pill ${buffer?.activeBoundary === 'right' ? 'sp-sel-boundary-active' : ''} ${boundaryPulse === 'right' ? 'sp-sel-boundary-pulse' : ''}`}>RIGHT →</span>
+              <div className="sp-sel-boundary" role="radiogroup" aria-label="Active boundary">
+                <span className={`sp-sel-boundary-pill ${buffer?.activeBoundary === 'left' ? 'sp-sel-boundary-active' : ''}`} role="radio" aria-checked={buffer?.activeBoundary === 'left'} aria-label="Left boundary">L</span>
+                <span className="sp-sel-boundary-divider">/</span>
+                <span className={`sp-sel-boundary-pill ${buffer?.activeBoundary === 'right' ? 'sp-sel-boundary-active' : ''}`} role="radio" aria-checked={buffer?.activeBoundary === 'right'} aria-label="Right boundary">R</span>
               </div>
             </div>
             {buffer && (
@@ -908,22 +929,20 @@ export default function SidePanelApp() {
                       width: `${((buffer.rightIndex - buffer.leftIndex + 1) / buffer.totalTabs) * 100}%`,
                     }}
                   />
-                  <div className="sp-range-boundary sp-range-left" style={{ left: `${(buffer.leftIndex / buffer.totalTabs) * 100}%` }}>
-                    <div className={`sp-boundary-marker ${buffer.activeBoundary === 'left' ? 'sp-boundary-active' : ''}`} />
-                  </div>
-                  <div className="sp-range-boundary sp-range-right" style={{ left: `${((buffer.rightIndex + 1) / buffer.totalTabs) * 100}%` }}>
-                    <div className={`sp-boundary-marker ${buffer.activeBoundary === 'right' ? 'sp-boundary-active' : ''}`} />
-                  </div>
+                  <div
+                    className={`sp-range-handle ${buffer.activeBoundary === 'left' ? 'sp-range-handle-active' : ''}`}
+                    style={{ left: `${(buffer.leftIndex / buffer.totalTabs) * 100}%` }}
+                  />
+                  <div
+                    className={`sp-range-handle ${buffer.activeBoundary === 'right' ? 'sp-range-handle-active' : ''}`}
+                    style={{ left: `${((buffer.rightIndex + 1) / buffer.totalTabs) * 100}%` }}
+                  />
                 </div>
               </div>
             )}
-            <div className="sp-sel-hints">
-              <span className="sp-sel-hint"><kbd className="sp-kbd sp-kbd-sm">Space</kbd> toggle boundary</span>
-              <span className="sp-sel-hint"><kbd className="sp-kbd sp-kbd-sm">&larr;</kbd> <kbd className="sp-kbd sp-kbd-sm">&rarr;</kbd> adjust range</span>
-            </div>
             <div className="sp-btn-row">
-              <button className="sp-btn sp-btn-ghost" onClick={addCurrentTab} disabled={status === 'capturing'}>+ Current</button>
-              <button className="sp-btn sp-btn-ghost" onClick={addSelectedTabs} disabled={status === 'capturing'}>+ Selected</button>
+              <button className="sp-btn sp-btn-ghost" onClick={addCurrentTab} disabled={status === 'capturing'} data-focus-section="capture">+ Current</button>
+              <button className="sp-btn sp-btn-ghost" onClick={addSelectedTabs} disabled={status === 'capturing'} data-focus-section="capture">+ Selected</button>
               <button className="sp-btn sp-btn-ghost" onClick={addAllTabs} disabled={status === 'capturing'}>+ All</button>
               <button className="sp-btn sp-btn-ghost" onClick={clearSources} disabled={sources.length === 0}>Clear</button>
             </div>
@@ -931,30 +950,13 @@ export default function SidePanelApp() {
         )}
       </section>
 
-      {/* SECTION: KEYBOARD */}
-      <section className="sp-section">
-        <div className="sp-section-header" onClick={() => toggleSection('keyboard')}>
-          <h2 className="sp-section-label">KEYBOARD</h2>
-          <span className="sp-section-toggle">{collapsed.has('keyboard') ? '\u25B6' : '\u25BC'}</span>
-        </div>
-        {!collapsed.has('keyboard') && (
-          <div className="sp-section-body">
-            <div className="sp-keyboard-grid">
-              <div className="sp-key-item"><kbd className="sp-kbd">Enter</kbd> Capture &amp; focus prompt</div>
-              <div className="sp-key-item"><kbd className="sp-kbd">Enter</kbd><span className="sp-key-sub">in prompt</span> Generate</div>
-              <div className="sp-key-item"><kbd className="sp-kbd">Ctrl/⌘ Enter</kbd> Generate from anywhere</div>
-              <div className="sp-key-item"><kbd className="sp-kbd">&larr;</kbd><kbd className="sp-kbd">&rarr;</kbd> Adjust range</div>
-              <div className="sp-key-item"><kbd className="sp-kbd">Space</kbd> Toggle boundary</div>
-              <div className="sp-key-item"><kbd className="sp-kbd">&uarr;</kbd> Create pane</div>
-              <div className="sp-key-item"><kbd className="sp-kbd">&darr;</kbd> Release pane</div>
-              <div className="sp-key-item"><kbd className="sp-kbd">G</kbd> Smart Group</div>
-              <div className="sp-key-item"><kbd className="sp-kbd">S</kbd> Quick summarize</div>
-              <div className="sp-key-item"><kbd className="sp-kbd">C</kbd> Compare sources</div>
-              <div className="sp-key-item"><kbd className="sp-kbd">Esc</kbd> Close / blur / cancel</div>
-            </div>
-          </div>
-        )}
-      </section>
+      {/* SHORTCUTS (always visible) */}
+      <div className="sp-shortcuts-card">
+        <span className="sp-shortcuts-label">Keys</span>
+        <span className="sp-shortcut"><kbd className="sp-kbd">Space</kbd> toggle</span>
+        <span className="sp-shortcut"><kbd className="sp-kbd">&larr;</kbd><kbd className="sp-kbd">&rarr;</kbd> range</span>
+        <span className="sp-shortcut"><kbd className="sp-kbd">Enter</kbd> generate</span>
+      </div>
 
       {/* SECTION: PANE */}
       <section className="sp-section">
@@ -1162,8 +1164,10 @@ export default function SidePanelApp() {
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             rows={2}
+            data-focus-section="prompt"
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+              if (e.key === 'Enter' && e.shiftKey) return;
+              if (e.key === 'Enter') {
                 e.preventDefault();
                 generate();
               } else if (e.key === 'Escape') {
@@ -1179,10 +1183,10 @@ export default function SidePanelApp() {
             </div>
           )}
           <div className="sp-generate-row">
-            <button className="sp-btn sp-btn-generate" onClick={generate} disabled={status === 'generating'}>
+            <button className="sp-btn sp-btn-generate" onClick={generate} disabled={status === 'generating'} data-focus-section="generate">
               {status === 'generating' ? 'Generating...' : 'Generate'}
             </button>
-            <span className="sp-gen-hint"><kbd className="sp-kbd sp-kbd-sm">&#8984;Enter</kbd> to generate</span>
+            <span className="sp-gen-hint"><kbd className="sp-gen-kbd">Enter</kbd></span>
           </div>
         </div>
       </section>

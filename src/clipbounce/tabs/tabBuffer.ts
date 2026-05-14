@@ -66,6 +66,28 @@ export function shrinkRight(state: TabBufferState): TabBufferState {
   };
 }
 
+const FAST_STEP = 5;
+
+export function growLeftFast(state: TabBufferState): TabBufferState {
+  if (state.activeBoundary !== 'left') return state;
+  return { ...state, leftIndex: Math.max(0, state.leftIndex - FAST_STEP) };
+}
+
+export function shrinkLeftFast(state: TabBufferState): TabBufferState {
+  if (state.activeBoundary !== 'left') return state;
+  return { ...state, leftIndex: Math.min(state.rightIndex, state.leftIndex + FAST_STEP) };
+}
+
+export function growRightFast(state: TabBufferState): TabBufferState {
+  if (state.activeBoundary !== 'right') return state;
+  return { ...state, rightIndex: Math.min(state.totalTabs - 1, state.rightIndex + FAST_STEP) };
+}
+
+export function shrinkRightFast(state: TabBufferState): TabBufferState {
+  if (state.activeBoundary !== 'right') return state;
+  return { ...state, rightIndex: Math.max(state.leftIndex, state.rightIndex - FAST_STEP) };
+}
+
 export function getBufferedTabIds(state: TabBufferState): number[] {
   const ids: number[] = [];
   for (let i = state.leftIndex; i <= state.rightIndex; i++) {
