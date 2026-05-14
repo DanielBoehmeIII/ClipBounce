@@ -196,15 +196,17 @@ export default function App() {
     promptRef.current?.focus();
   }, [sources, captureBufferedTabs]);
 
-  const handlePromptEnter = useCallback(() => {
-    const currentSources = sourcesRef.current;
+  const handlePromptEnter = useCallback(async () => {
+    let currentSources = sourcesRef.current;
     if (currentSources.length === 0) {
-      setError('No sources captured. Press Enter in the main view first.');
-      return;
+      const captured = await captureBufferedTabs();
+      if (!captured) return;
+      currentSources = sourcesRef.current;
+      if (currentSources.length === 0) return;
     }
     const p = (promptTextRef.current || '').trim() || DEFAULT_PROMPT;
     generateWithPrompt(currentSources, p);
-  }, []);
+  }, [captureBufferedTabs]);
 
   const handleGenerateShortcut = useCallback(async () => {
     let currentSources = sourcesRef.current;
@@ -264,6 +266,21 @@ export default function App() {
     setProgressMessage('');
   }, [sendMessage]);
 
+  const handleCompare = useCallback(async () => {
+    const comparePrompt = 'Compare the main ideas across these sources.';
+    setPrompt(comparePrompt);
+    let currentSources = sourcesRef.current;
+    if (currentSources.length === 0) {
+      const captured = await captureBufferedTabs();
+      if (!captured) return;
+      currentSources = sourcesRef.current;
+      if (currentSources.length === 0) return;
+    }
+    generateWithPrompt(currentSources, comparePrompt);
+  }, [captureBufferedTabs, generateWithPrompt]);
+  const handleCompareRef = useRef(handleCompare);
+  handleCompareRef.current = handleCompare;
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const buf = bufferRef.current;
@@ -302,10 +319,10 @@ export default function App() {
         setTimeout(() => setBoundaryPulse(null), 400);
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
-        handleCreatePane();
+        handleCreatePaneRef.current();
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
-        handleReleaseCurrentPane();
+        handleReleaseCurrentPaneRef.current();
       } else if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
         handleEnterKeyRef.current();
@@ -317,10 +334,13 @@ export default function App() {
         handleEscapeRef.current();
       } else if (e.key === 'g' || e.key === 'G') {
         e.preventDefault();
-        handleSmartGroup();
+        handleSmartGroupRef.current();
       } else if (e.key === 's' || e.key === 'S') {
         e.preventDefault();
         handleGenerateShortcutRef.current();
+      } else if (e.key === 'c' || e.key === 'C') {
+        e.preventDefault();
+        handleCompareRef.current();
       }
     };
     document.addEventListener('keydown', handler);
@@ -428,6 +448,9 @@ export default function App() {
     }
   }, [buffer, paneTitle, paneColor]);
 
+  const handleCreatePaneRef = useRef(handleCreatePane);
+  handleCreatePaneRef.current = handleCreatePane;
+
   const handleReleaseCurrentPane = useCallback(async () => {
     if (!currentPane) return;
     const released = await releasePane(currentPane.id);
@@ -436,6 +459,8 @@ export default function App() {
       setCurrentPane(null);
     }
   }, [currentPane]);
+  const handleReleaseCurrentPaneRef = useRef(handleReleaseCurrentPane);
+  handleReleaseCurrentPaneRef.current = handleReleaseCurrentPane;
 
   const handleReleasePane = useCallback(async (paneId: string) => {
     const released = await releasePane(paneId);
@@ -475,6 +500,7 @@ export default function App() {
 
   const handleSmartGroup = useCallback(async () => {
     if (!windowTabs.length) return;
+    setProgressMessage('Smart grouping tabs…');
     setSmartGrouping(true);
     try {
       const highlighted = windowTabs.filter(t => t.highlighted);
@@ -494,6 +520,9 @@ export default function App() {
     }
     setSmartGrouping(false);
   }, [windowTabs, panes]);
+
+  const handleSmartGroupRef = useRef(handleSmartGroup);
+  handleSmartGroupRef.current = handleSmartGroup;
 
   const handleAISmartGroup = useCallback(async () => {
     setSmartGrouping(true);
@@ -905,20 +934,20 @@ export default function App() {
             <div className="sel-metrics">
               <div className="sel-metric">
                 <span className="sel-metric-value">{bufferedCount}</span>
-                <span className="sel-metric-label">Buffer</span>
+                <span className="sel-metric-label">Selected</span>
               </div>
               <div className="sel-metric">
-                <span className="sel-metric-value" style={{ fontSize: '0.65rem', fontWeight: 500, color: 'var(--text-dim)' }}>{rangeLabel}</span>
-                <span className="sel-metric-label">Range</span>
+                <span className="sel-metric-value" style={{ fontSize: '0.65rem', fontWeight: 500, color: 'var(--text-dim)' }}>{rangeLabel || '—'}</span>
+                <span className="sel-metric-label">Buffered Range</span>
               </div>
               <div className="sel-metric">
                 <span className="sel-metric-value">{buffer?.totalTabs || 0}</span>
-                <span className="sel-metric-label">Total</span>
+                <span className="sel-metric-label">Total Tabs</span>
               </div>
               <div className="sel-boundary">
-                <span className={`sel-boundary-pill ${buffer?.activeBoundary === 'left' ? 'sel-boundary-active' : ''} ${boundaryPulse === 'left' ? 'sel-boundary-pulse' : ''}`}>LEFT</span>
-                <span className="sel-boundary-divider">&nbsp;/&nbsp;</span>
-                <span className={`sel-boundary-pill ${buffer?.activeBoundary === 'right' ? 'sel-boundary-active' : ''} ${boundaryPulse === 'right' ? 'sel-boundary-pulse' : ''}`}>RIGHT</span>
+                <span className={`sel-boundary-pill ${buffer?.activeBoundary === 'left' ? 'sel-boundary-active' : ''} ${boundaryPulse === 'left' ? 'sel-boundary-pulse' : ''}`}>← LEFT</span>
+                <span className="sel-boundary-divider"> · </span>
+                <span className={`sel-boundary-pill ${buffer?.activeBoundary === 'right' ? 'sel-boundary-active' : ''} ${boundaryPulse === 'right' ? 'sel-boundary-pulse' : ''}`}>RIGHT →</span>
               </div>
             </div>
             {buffer && (
@@ -945,9 +974,9 @@ export default function App() {
               <span className="sel-hint"><kbd className="kbd kbd-sm">&larr;</kbd> <kbd className="kbd kbd-sm">&rarr;</kbd> adjust range</span>
             </div>
             <div className="btn-row">
-              <button className="btn btn-secondary" onClick={addCurrentTab} disabled={status === 'capturing'}>+ Current</button>
-              <button className="btn btn-secondary" onClick={addSelectedTabs} disabled={status === 'capturing'}>+ Selected</button>
-              <button className="btn btn-secondary" onClick={addAllTabs} disabled={status === 'capturing'}>+ All</button>
+              <button className="btn btn-ghost" onClick={addCurrentTab} disabled={status === 'capturing'}>+ Current</button>
+              <button className="btn btn-ghost" onClick={addSelectedTabs} disabled={status === 'capturing'}>+ Selected</button>
+              <button className="btn btn-ghost" onClick={addAllTabs} disabled={status === 'capturing'}>+ All</button>
               <button className="btn btn-ghost" onClick={clearSources} disabled={sources.length === 0}>Clear</button>
             </div>
           </div>
@@ -965,13 +994,14 @@ export default function App() {
             <div className="keyboard-grid">
               <div className="key-item"><kbd className="kbd">Enter</kbd> Capture &amp; focus prompt</div>
               <div className="key-item"><kbd className="kbd">Enter</kbd><span className="key-sub">in prompt</span> Generate</div>
-              <div className="key-item"><kbd className="kbd">&#8984; Enter</kbd> Generate from anywhere</div>
+              <div className="key-item"><kbd className="kbd">Ctrl/⌘ Enter</kbd> Generate from anywhere</div>
               <div className="key-item"><kbd className="kbd">&larr;</kbd><kbd className="kbd">&rarr;</kbd> Adjust range</div>
               <div className="key-item"><kbd className="kbd">Space</kbd> Toggle boundary</div>
               <div className="key-item"><kbd className="kbd">&uarr;</kbd> Create pane</div>
               <div className="key-item"><kbd className="kbd">&darr;</kbd> Release pane</div>
               <div className="key-item"><kbd className="kbd">G</kbd> Smart Group</div>
               <div className="key-item"><kbd className="kbd">S</kbd> Quick summarize</div>
+              <div className="key-item"><kbd className="kbd">C</kbd> Compare sources</div>
               <div className="key-item"><kbd className="kbd">Esc</kbd> Close / blur / cancel</div>
             </div>
           </div>
@@ -986,12 +1016,16 @@ export default function App() {
         </div>
         {!collapsed.has('pane') && (
           <div className="section-body">
+            <div className="pane-key-hints">
+              <span className="pane-key-hint"><kbd className="kbd kbd-sm">↑</kbd> Create pane from buffer</span>
+              <span className="pane-key-hint"><kbd className="kbd kbd-sm">↓</kbd> Release active pane</span>
+            </div>
             <div className="pane-create-row">
               <input className="input" placeholder="Pane title (optional)" value={paneTitle} onChange={(e) => setPaneTitle(e.target.value)} />
               <select className="select" value={paneColor} onChange={(e) => setPaneColor(e.target.value as PaneColor)}>
                 {PANE_COLORS.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
               </select>
-              <button className="btn btn-primary" onClick={() => handleCreatePane()} disabled={!buffer || bufferedCount === 0}>
+              <button className="btn btn-primary" onClick={() => handleCreatePaneRef.current()} disabled={!buffer || bufferedCount === 0}>
                 Create
               </button>
             </div>
@@ -1266,13 +1300,12 @@ export default function App() {
             </div>
             <div className="synthesis">{renderSynthesis(result.synthesis)}</div>
 
-            <h3 className="subsection-title">Per-Source Summaries</h3>
-            {result.sourceSummaries.map((summary) => {
-              const srcIdx = result.sourceSummaries.indexOf(summary) + 1;
-              return (
+            <details className="summaries-details">
+              <summary className="subsection-title summaries-toggle">Per-Source Summaries ({result.sourceSummaries.length})</summary>
+              {result.sourceSummaries.map((summary, idx) => (
                 <div key={summary.sourceId} className="summary-card">
                   <div className="summary-title">
-                    <span className="summary-num">{srcIdx}</span>
+                    <span className="summary-num">{idx + 1}</span>
                     {summary.title || summary.url}
                   </div>
                   <p className="summary-text">{summary.summary}</p>
@@ -1280,8 +1313,8 @@ export default function App() {
                     <ul className="key-points">{summary.keyPoints.map((kp, i) => <li key={i}>{kp}</li>)}</ul>
                   )}
                 </div>
-              );
-            })}
+              ))}
+            </details>
 
             {result.failures.length > 0 && (
               <div className="failures">

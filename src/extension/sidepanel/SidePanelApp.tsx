@@ -186,15 +186,17 @@ export default function SidePanelApp() {
     promptRef.current?.focus();
   }, [sources, captureBufferedTabs]);
 
-  const handlePromptEnter = useCallback(() => {
-    const currentSources = sourcesRef.current;
+  const handlePromptEnter = useCallback(async () => {
+    let currentSources = sourcesRef.current;
     if (currentSources.length === 0) {
-      setError('No sources captured. Press Enter in the main view first.');
-      return;
+      const captured = await captureBufferedTabs();
+      if (!captured) return;
+      currentSources = sourcesRef.current;
+      if (currentSources.length === 0) return;
     }
     const p = (promptTextRef.current || '').trim() || DEFAULT_PROMPT;
     generateWithPrompt(currentSources, p);
-  }, []);
+  }, [captureBufferedTabs]);
 
   const handleGenerateShortcut = useCallback(async () => {
     let currentSources = sourcesRef.current;
@@ -225,6 +227,20 @@ export default function SidePanelApp() {
   handlePromptEnterRef.current = handlePromptEnter;
   const handleEscapeRef = useRef(handleEscape);
   handleEscapeRef.current = handleEscape;
+  const handleCompare = useCallback(async () => {
+    const comparePrompt = 'Compare the main ideas across these sources.';
+    setPrompt(comparePrompt);
+    let currentSources = sourcesRef.current;
+    if (currentSources.length === 0) {
+      const captured = await captureBufferedTabs();
+      if (!captured) return;
+      currentSources = sourcesRef.current;
+      if (currentSources.length === 0) return;
+    }
+    generateWithPrompt(currentSources, comparePrompt);
+  }, [captureBufferedTabs, generateWithPrompt]);
+  const handleCompareRef = useRef(handleCompare);
+  handleCompareRef.current = handleCompare;
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -264,10 +280,10 @@ export default function SidePanelApp() {
         setTimeout(() => setBoundaryPulse(null), 400);
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
-        handleCreatePane();
+        handleCreatePaneRef.current();
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
-        handleReleaseCurrentPane();
+        handleReleaseCurrentPaneRef.current();
       } else if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
         handleEnterKeyRef.current();
@@ -279,10 +295,13 @@ export default function SidePanelApp() {
         handleEscapeRef.current();
       } else if (e.key === 'g' || e.key === 'G') {
         e.preventDefault();
-        handleSmartGroup();
+        handleSmartGroupRef.current();
       } else if (e.key === 's' || e.key === 'S') {
         e.preventDefault();
         handleGenerateShortcutRef.current();
+      } else if (e.key === 'c' || e.key === 'C') {
+        e.preventDefault();
+        handleCompareRef.current();
       }
     };
     document.addEventListener('keydown', handler);
@@ -389,6 +408,8 @@ export default function SidePanelApp() {
       setProgressMessage('');
     }
   }, [buffer, paneTitle, paneColor]);
+  const handleCreatePaneRef = useRef(handleCreatePane);
+  handleCreatePaneRef.current = handleCreatePane;
 
   const handleReleaseCurrentPane = useCallback(async () => {
     if (!currentPane) return;
@@ -398,6 +419,8 @@ export default function SidePanelApp() {
       setCurrentPane(null);
     }
   }, [currentPane]);
+  const handleReleaseCurrentPaneRef = useRef(handleReleaseCurrentPane);
+  handleReleaseCurrentPaneRef.current = handleReleaseCurrentPane;
 
   const handleReleasePane = useCallback(async (paneId: string) => {
     const released = await releasePane(paneId);
@@ -437,6 +460,7 @@ export default function SidePanelApp() {
 
   const handleSmartGroup = useCallback(async () => {
     if (!windowTabs.length) return;
+    setProgressMessage('Smart grouping tabs…');
     setSmartGrouping(true);
     try {
       const highlighted = windowTabs.filter(t => t.highlighted);
@@ -456,6 +480,8 @@ export default function SidePanelApp() {
     }
     setSmartGrouping(false);
   }, [windowTabs, panes]);
+  const handleSmartGroupRef = useRef(handleSmartGroup);
+  handleSmartGroupRef.current = handleSmartGroup;
 
   const handleAISmartGroup = useCallback(async () => {
     setSmartGrouping(true);
@@ -857,20 +883,20 @@ export default function SidePanelApp() {
             <div className="sp-sel-metrics">
               <div className="sp-sel-metric">
                 <span className="sp-sel-metric-value">{bufferedCount}</span>
-                <span className="sp-sel-metric-label">Buffer</span>
+                <span className="sp-sel-metric-label">Selected</span>
               </div>
               <div className="sp-sel-metric">
-                <span className="sp-sel-metric-value" style={{ fontSize: '0.65rem', fontWeight: 500, color: 'var(--sp-text-dim)' }}>{rangeLabel}</span>
-                <span className="sp-sel-metric-label">Range</span>
+                <span className="sp-sel-metric-value" style={{ fontSize: '0.65rem', fontWeight: 500, color: 'var(--sp-text-dim)' }}>{rangeLabel || '—'}</span>
+                <span className="sp-sel-metric-label">Buffered Range</span>
               </div>
               <div className="sp-sel-metric">
                 <span className="sp-sel-metric-value">{buffer?.totalTabs || 0}</span>
-                <span className="sp-sel-metric-label">Total</span>
+                <span className="sp-sel-metric-label">Total Tabs</span>
               </div>
               <div className="sp-sel-boundary">
-                <span className={`sp-sel-boundary-pill ${buffer?.activeBoundary === 'left' ? 'sp-sel-boundary-active' : ''} ${boundaryPulse === 'left' ? 'sp-sel-boundary-pulse' : ''}`}>LEFT</span>
-                <span className="sp-sel-boundary-divider">&nbsp;/&nbsp;</span>
-                <span className={`sp-sel-boundary-pill ${buffer?.activeBoundary === 'right' ? 'sp-sel-boundary-active' : ''} ${boundaryPulse === 'right' ? 'sp-sel-boundary-pulse' : ''}`}>RIGHT</span>
+                <span className={`sp-sel-boundary-pill ${buffer?.activeBoundary === 'left' ? 'sp-sel-boundary-active' : ''} ${boundaryPulse === 'left' ? 'sp-sel-boundary-pulse' : ''}`}>← LEFT</span>
+                <span className="sp-sel-boundary-divider"> · </span>
+                <span className={`sp-sel-boundary-pill ${buffer?.activeBoundary === 'right' ? 'sp-sel-boundary-active' : ''} ${boundaryPulse === 'right' ? 'sp-sel-boundary-pulse' : ''}`}>RIGHT →</span>
               </div>
             </div>
             {buffer && (
@@ -897,9 +923,9 @@ export default function SidePanelApp() {
               <span className="sp-sel-hint"><kbd className="sp-kbd sp-kbd-sm">&larr;</kbd> <kbd className="sp-kbd sp-kbd-sm">&rarr;</kbd> adjust range</span>
             </div>
             <div className="sp-btn-row">
-              <button className="sp-btn sp-btn-secondary" onClick={addCurrentTab} disabled={status === 'capturing'}>+ Current</button>
-              <button className="sp-btn sp-btn-secondary" onClick={addSelectedTabs} disabled={status === 'capturing'}>+ Selected</button>
-              <button className="sp-btn sp-btn-secondary" onClick={addAllTabs} disabled={status === 'capturing'}>+ All</button>
+              <button className="sp-btn sp-btn-ghost" onClick={addCurrentTab} disabled={status === 'capturing'}>+ Current</button>
+              <button className="sp-btn sp-btn-ghost" onClick={addSelectedTabs} disabled={status === 'capturing'}>+ Selected</button>
+              <button className="sp-btn sp-btn-ghost" onClick={addAllTabs} disabled={status === 'capturing'}>+ All</button>
               <button className="sp-btn sp-btn-ghost" onClick={clearSources} disabled={sources.length === 0}>Clear</button>
             </div>
           </div>
@@ -917,13 +943,14 @@ export default function SidePanelApp() {
             <div className="sp-keyboard-grid">
               <div className="sp-key-item"><kbd className="sp-kbd">Enter</kbd> Capture &amp; focus prompt</div>
               <div className="sp-key-item"><kbd className="sp-kbd">Enter</kbd><span className="sp-key-sub">in prompt</span> Generate</div>
-              <div className="sp-key-item"><kbd className="sp-kbd">&#8984; Enter</kbd> Generate from anywhere</div>
+              <div className="sp-key-item"><kbd className="sp-kbd">Ctrl/⌘ Enter</kbd> Generate from anywhere</div>
               <div className="sp-key-item"><kbd className="sp-kbd">&larr;</kbd><kbd className="sp-kbd">&rarr;</kbd> Adjust range</div>
               <div className="sp-key-item"><kbd className="sp-kbd">Space</kbd> Toggle boundary</div>
               <div className="sp-key-item"><kbd className="sp-kbd">&uarr;</kbd> Create pane</div>
               <div className="sp-key-item"><kbd className="sp-kbd">&darr;</kbd> Release pane</div>
               <div className="sp-key-item"><kbd className="sp-kbd">G</kbd> Smart Group</div>
               <div className="sp-key-item"><kbd className="sp-kbd">S</kbd> Quick summarize</div>
+              <div className="sp-key-item"><kbd className="sp-kbd">C</kbd> Compare sources</div>
               <div className="sp-key-item"><kbd className="sp-kbd">Esc</kbd> Close / blur / cancel</div>
             </div>
           </div>
@@ -938,12 +965,16 @@ export default function SidePanelApp() {
         </div>
         {!collapsed.has('pane') && (
           <div className="sp-section-body">
+            <div className="sp-pane-key-hints">
+              <span className="sp-pane-key-hint"><kbd className="sp-kbd sp-kbd-sm">↑</kbd> Create pane from buffer</span>
+              <span className="sp-pane-key-hint"><kbd className="sp-kbd sp-kbd-sm">↓</kbd> Release active pane</span>
+            </div>
             <div className="sp-pane-create-row">
               <input className="sp-input" placeholder="Pane title (optional)" value={paneTitle} onChange={(e) => setPaneTitle(e.target.value)} />
               <select className="sp-select" value={paneColor} onChange={(e) => setPaneColor(e.target.value as PaneColor)}>
                 {PANE_COLORS.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
               </select>
-              <button className="sp-btn sp-btn-primary" onClick={handleCreatePane} disabled={!buffer || bufferedCount === 0}>
+              <button className="sp-btn sp-btn-primary" onClick={() => handleCreatePaneRef.current()} disabled={!buffer || bufferedCount === 0}>
                 Create
               </button>
             </div>
@@ -1191,13 +1222,12 @@ export default function SidePanelApp() {
             </div>
             <div className="sp-synthesis">{renderSynthesis(result.synthesis)}</div>
 
-            <h3 className="sp-subsection-title">Per-Source Summaries</h3>
-            {result.sourceSummaries.map((summary) => {
-              const srcIdx = result.sourceSummaries.indexOf(summary) + 1;
-              return (
+            <details className="sp-summaries-details">
+              <summary className="sp-subsection-title sp-summaries-toggle">Per-Source Summaries ({result.sourceSummaries.length})</summary>
+              {result.sourceSummaries.map((summary, idx) => (
                 <div key={summary.sourceId} className="sp-summary-card">
                   <div className="sp-summary-title">
-                    <span className="sp-summary-num">{srcIdx}</span>
+                    <span className="sp-summary-num">{idx + 1}</span>
                     {summary.title || summary.url}
                   </div>
                   <p className="sp-summary-text">{summary.summary}</p>
@@ -1205,8 +1235,8 @@ export default function SidePanelApp() {
                     <ul className="sp-key-points">{summary.keyPoints.map((kp, i) => <li key={i}>{kp}</li>)}</ul>
                   )}
                 </div>
-              );
-            })}
+              ))}
+            </details>
 
             {result.failures.length > 0 && (
               <div className="sp-failures">

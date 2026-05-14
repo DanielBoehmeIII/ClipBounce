@@ -148,9 +148,9 @@ body {
 
 .section-label {
   font-size: 0.6rem;
-  font-weight: 700;
+  font-weight: 500;
   color: var(--text-muted);
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
@@ -813,3 +813,42 @@ body {
   white-space: nowrap;
 }
 .sp-open-btn:hover { background: rgba(217, 174, 63, 0.12); color: var(--accent); }
+
+/* PANE KEY HINTS */
+.pane-key-hints {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 2px;
+}
+.pane-key-hint {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* SUMMARIES DETAILS (collapsible) */
+.summaries-details {
+  margin-top: 4px;
+}
+.summaries-toggle {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+}
+.summaries-toggle::-webkit-details-marker { display: none; }
+.summaries-toggle::before {
+  content: '▶';
+  font-size: 0.5rem;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+.summaries-details[open] .summaries-toggle::before {
+  transform: rotate(90deg);
+}
+
